@@ -9,9 +9,9 @@ if [[ ! -f "$HYPR/hyprland.conf" ]]; then
   exit 0
 fi
 
-if grep -q '# --- BEGIN ko omarchy-setup calendar ---' "$HYPR/hyprland.conf"; then
+if grep -q '# --- BEGIN ko komarchy calendar ---' "$HYPR/hyprland.conf"; then
   echo "removing calendar rule..."
-  sed -i '/# --- BEGIN ko omarchy-setup calendar ---/,/# --- END ko omarchy-setup calendar ---/d' "$HYPR/hyprland.conf"
+  sed -i '/# --- BEGIN ko komarchy calendar ---/,/# --- END ko komarchy calendar ---/d' "$HYPR/hyprland.conf"
   echo "hyprland.conf reverted"
 else
   echo "calendar rule not found, skipping"

@@ -13,10 +13,10 @@ echo "patching envs.conf..."
 
 cat >> "$HYPR/envs.conf" << 'EOF'
 
-# --- BEGIN ko omarchy-setup libre ---
+# --- BEGIN ko komarchy libre ---
 # LibreOffice Wayland scaling fix
 env = SAL_USE_VCLPLUGIN,gtk3
-# --- END ko omarchy-setup libre ---
+# --- END ko komarchy libre ---
 EOF
 
 # source envs.conf from hyprland.conf if not already

@@ -4,7 +4,7 @@ set -euo pipefail
 
 BASHRC="$HOME/.bashrc"
 
-if grep -q '# --- BEGIN ko omarchy-setup cds ---' "$BASHRC"; then
+if grep -q '# --- BEGIN ko komarchy cds ---' "$BASHRC"; then
   echo "cds already configured, skipping"
   exit 0
 fi
@@ -13,7 +13,7 @@ echo "adding cds function to bashrc..."
 
 cat >> "$BASHRC" << 'BASHRC'
 
-# --- BEGIN ko omarchy-setup cds ---
+# --- BEGIN ko komarchy cds ---
 
 # Unified fuzzy search: dirs, filenames, file contents — cd into result
 __cds_search() {
@@ -61,7 +61,7 @@ cds() {
   builtin cd -- "$dir"
 }
 
-# --- END ko omarchy-setup cds ---
+# --- END ko komarchy cds ---
 BASHRC
 
 echo "cds function added"

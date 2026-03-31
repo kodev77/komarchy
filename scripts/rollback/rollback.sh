@@ -5,7 +5,7 @@ REPO_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 MIGRATIONS_DIR="$REPO_DIR/scripts/migration"
 export REPO_DIR MIGRATIONS_DIR
 
-STATE_DIR="$HOME/.local/state/kodev77/omarchy-setup/migrations"
+STATE_DIR="$HOME/.local/state/kodev77/komarchy/migrations"
 
 declare -A GROUP_NAMES=(
   [000]="hello" [001]="hyprland" [002]="waybar" [003]="fzf"

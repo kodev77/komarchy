@@ -9,7 +9,7 @@ if [[ ! -f "$MONITORS_CONF" ]]; then
   exit 0
 fi
 
-if grep -q '# --- BEGIN ko omarchy-setup monitors ---' "$MONITORS_CONF"; then
+if grep -q '# --- BEGIN ko komarchy monitors ---' "$MONITORS_CONF"; then
   echo "monitors already configured, skipping"
   exit 0
 fi
@@ -23,7 +23,7 @@ sed -i 's|^monitor=,preferred,auto,auto$|# monitor=,preferred,auto,auto|' "$MONI
 # Append monitor config with markers
 cat >> "$MONITORS_CONF" << 'EOF'
 
-# --- BEGIN ko omarchy-setup monitors ---
+# --- BEGIN ko komarchy monitors ---
 
 # ViewSonic 32" 1440p (HDMI)
 monitor = desc:ViewSonic Corporation VX3276 Series, 2560x1440@60, 0x0, 1
@@ -36,7 +36,7 @@ monitor = eDP-1, 2880x1800@60, 0x0, 2, mirror, desc:LG Electronics LG ULTRAGEAR
 # fallback for any other display
 monitor = , preferred, auto, auto
 
-# --- END ko omarchy-setup monitors ---
+# --- END ko komarchy monitors ---
 EOF
 
 echo "monitors.conf patched"

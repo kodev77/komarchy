@@ -9,7 +9,7 @@ if [[ ! -f "$HYPR/looknfeel.conf" ]]; then
   exit 0
 fi
 
-if grep -q '# --- BEGIN ko omarchy-setup groupbar ---' "$HYPR/looknfeel.conf"; then
+if grep -q '# --- BEGIN ko komarchy groupbar ---' "$HYPR/looknfeel.conf"; then
   echo "groupbar already configured, skipping"
   exit 0
 fi
@@ -18,7 +18,7 @@ echo "patching looknfeel.conf..."
 
 cat >> "$HYPR/looknfeel.conf" << 'EOF'
 
-# --- BEGIN ko omarchy-setup groupbar ---
+# --- BEGIN ko komarchy groupbar ---
 
 group {
     groupbar {
@@ -26,7 +26,7 @@ group {
     }
 }
 
-# --- END ko omarchy-setup groupbar ---
+# --- END ko komarchy groupbar ---
 EOF
 
 echo "looknfeel.conf patched"

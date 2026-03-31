@@ -9,9 +9,9 @@ if [[ ! -f "$HYPR/looknfeel.conf" ]]; then
   exit 0
 fi
 
-if grep -q '# --- BEGIN ko omarchy-setup groupbar ---' "$HYPR/looknfeel.conf"; then
+if grep -q '# --- BEGIN ko komarchy groupbar ---' "$HYPR/looknfeel.conf"; then
   echo "removing groupbar..."
-  sed -i '/# --- BEGIN ko omarchy-setup groupbar ---/,/# --- END ko omarchy-setup groupbar ---/d' "$HYPR/looknfeel.conf"
+  sed -i '/# --- BEGIN ko komarchy groupbar ---/,/# --- END ko komarchy groupbar ---/d' "$HYPR/looknfeel.conf"
   echo "looknfeel.conf reverted"
 else
   echo "groupbar not found, skipping"

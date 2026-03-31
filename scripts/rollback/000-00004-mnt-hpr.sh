@@ -9,7 +9,7 @@ if [[ ! -f "$MONITORS_CONF" ]]; then
   exit 0
 fi
 
-if ! grep -q '# --- BEGIN ko omarchy-setup monitors ---' "$MONITORS_CONF"; then
+if ! grep -q '# --- BEGIN ko komarchy monitors ---' "$MONITORS_CONF"; then
   echo "monitor config not found, skipping"
   exit 0
 fi
@@ -17,7 +17,7 @@ fi
 echo "reverting monitors.conf..."
 
 # Remove the marker block
-sed -i '/# --- BEGIN ko omarchy-setup monitors ---/,/# --- END ko omarchy-setup monitors ---/d' "$MONITORS_CONF"
+sed -i '/# --- BEGIN ko komarchy monitors ---/,/# --- END ko komarchy monitors ---/d' "$MONITORS_CONF"
 
 # Restore GDK_SCALE
 sed -i 's/^env = GDK_SCALE,1$/env = GDK_SCALE,2/' "$MONITORS_CONF"

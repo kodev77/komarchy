@@ -18,10 +18,10 @@ fi
 echo "patching registrymodifications.xcu..."
 
 sed -i '/<\/oor:items>/i \
-<!-- BEGIN ko omarchy-setup libre-icons -->\
+<!-- BEGIN ko komarchy libre-icons -->\
 <item oor:path="/org.openoffice.Office.Common/Misc"><prop oor:name="SymbolSet" oor:op="fuse"><value>0</value></prop></item>\
 <item oor:path="/org.openoffice.Office.Common/Misc"><prop oor:name="SidebarIconSize" oor:op="fuse"><value>0</value></prop></item>\
 <item oor:path="/org.openoffice.Office.Common/Misc"><prop oor:name="NotebookbarIconSize" oor:op="fuse"><value>0</value></prop></item>\
-<!-- END ko omarchy-setup libre-icons -->' "$XCU"
+<!-- END ko komarchy libre-icons -->' "$XCU"
 
 echo "icon sizes set to small"

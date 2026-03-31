@@ -23,12 +23,12 @@ echo "patching envs.conf..."
 
 cat >> "$HYPR/envs.conf" << 'EOF'
 
-# --- BEGIN ko omarchy-setup nvidia ---
+# --- BEGIN ko komarchy nvidia ---
 # NVIDIA
 env = NVD_BACKEND,direct
 env = LIBVA_DRIVER_NAME,nvidia
 env = __GLX_VENDOR_LIBRARY_NAME,nvidia
-# --- END ko omarchy-setup nvidia ---
+# --- END ko komarchy nvidia ---
 EOF
 
 echo "envs.conf patched"

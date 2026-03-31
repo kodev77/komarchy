@@ -13,7 +13,7 @@ echo "appending git config customizations..."
 
 cat >> "$CONFIG" << 'GITCONFIG'
 
-# --- BEGIN ko omarchy-setup ---
+# --- BEGIN ko komarchy ---
 
 [user]
 	name = kodev
@@ -66,7 +66,7 @@ cat >> "$CONFIG" << 'GITCONFIG'
 	smudge = git-lfs smudge -- %f
 	process = git-lfs filter-process
 
-# --- END ko omarchy-setup ---
+# --- END ko komarchy ---
 GITCONFIG
 
 echo "git config applied"

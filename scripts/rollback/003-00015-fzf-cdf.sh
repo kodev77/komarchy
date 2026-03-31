@@ -4,9 +4,9 @@ set -euo pipefail
 
 BASHRC="$HOME/.bashrc"
 
-if grep -q '# --- BEGIN ko omarchy-setup cdf ---' "$BASHRC"; then
+if grep -q '# --- BEGIN ko komarchy cdf ---' "$BASHRC"; then
   echo "removing cdf function..."
-  sed -i '/# --- BEGIN ko omarchy-setup cdf ---/,/# --- END ko omarchy-setup cdf ---/d' "$BASHRC"
+  sed -i '/# --- BEGIN ko komarchy cdf ---/,/# --- END ko komarchy cdf ---/d' "$BASHRC"
   echo "cdf function removed"
 else
   echo "cdf not found, skipping"

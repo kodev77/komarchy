@@ -9,9 +9,9 @@ if [[ ! -f "$HYPR/bindings.conf" ]]; then
   exit 0
 fi
 
-if grep -q '# --- BEGIN ko omarchy-setup keybinds ---' "$HYPR/bindings.conf"; then
+if grep -q '# --- BEGIN ko komarchy keybinds ---' "$HYPR/bindings.conf"; then
   echo "removing keybinds..."
-  sed -i '/# --- BEGIN ko omarchy-setup keybinds ---/,/# --- END ko omarchy-setup keybinds ---/d' "$HYPR/bindings.conf"
+  sed -i '/# --- BEGIN ko komarchy keybinds ---/,/# --- END ko komarchy keybinds ---/d' "$HYPR/bindings.conf"
   echo "bindings.conf reverted"
 else
   echo "keybinds not found, skipping"

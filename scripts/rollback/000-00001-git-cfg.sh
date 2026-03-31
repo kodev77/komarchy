@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# hello: remove ko omarchy-setup git config additions
+# hello: remove ko komarchy git config additions
 set -euo pipefail
 
 CONFIG="$HOME/.config/git/config"
@@ -9,9 +9,9 @@ if [[ ! -f "$CONFIG" ]]; then
   exit 0
 fi
 
-if grep -q "# --- BEGIN ko omarchy-setup ---" "$CONFIG"; then
+if grep -q "# --- BEGIN ko komarchy ---" "$CONFIG"; then
   echo "removing git config customizations..."
-  sed -i '/# --- BEGIN ko omarchy-setup ---/,/# --- END ko omarchy-setup ---/d' "$CONFIG"
+  sed -i '/# --- BEGIN ko komarchy ---/,/# --- END ko komarchy ---/d' "$CONFIG"
   echo "git config removed"
 else
   echo "git config customizations not found, skipping"

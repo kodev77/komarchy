@@ -4,13 +4,13 @@ set -euo pipefail
 
 HYPR="$HOME/.config/hypr"
 
-if [[ ! -f "$HYPR/envs.conf" ]] || ! grep -q '# --- BEGIN ko omarchy-setup libre ---' "$HYPR/envs.conf"; then
+if [[ ! -f "$HYPR/envs.conf" ]] || ! grep -q '# --- BEGIN ko komarchy libre ---' "$HYPR/envs.conf"; then
   echo "LibreOffice env not configured, skipping"
   exit 0
 fi
 
 echo "reverting LibreOffice env..."
-sed -i '/# --- BEGIN ko omarchy-setup libre ---/,/# --- END ko omarchy-setup libre ---/d' "$HYPR/envs.conf"
+sed -i '/# --- BEGIN ko komarchy libre ---/,/# --- END ko komarchy libre ---/d' "$HYPR/envs.conf"
 
 # remove source line from hyprland.conf
 if grep -q 'source = ~/.config/hypr/envs.conf' "$HYPR/hyprland.conf"; then

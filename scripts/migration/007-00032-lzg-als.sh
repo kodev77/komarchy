@@ -11,9 +11,9 @@ echo "adding lg alias to bashrc..."
 
 cat >> "$HOME/.bashrc" << 'EOF'
 
-# --- BEGIN ko omarchy-setup lazygit ---
+# --- BEGIN ko komarchy lazygit ---
 alias lg='lazygit'
-# --- END ko omarchy-setup lazygit ---
+# --- END ko komarchy lazygit ---
 EOF
 
 echo "lg alias added"

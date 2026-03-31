@@ -20,7 +20,7 @@ if grep -q "^bm()" "$BASHRC"; then
   exit 0
 fi
 
-if grep -q '# --- BEGIN ko omarchy-setup bash-alias ---' "$BASHRC"; then
+if grep -q '# --- BEGIN ko komarchy bash-alias ---' "$BASHRC"; then
   sed -i "/alias ll='lsa'/a \\
 bm() {\\
   local dir=~/.config/omarchy/app-groups\\
