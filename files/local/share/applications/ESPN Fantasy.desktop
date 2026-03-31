@@ -1,0 +1,9 @@
+[Desktop Entry]
+Version=1.0
+Name=ESPN Fantasy
+Comment=ESPN Fantasy (Personal profile)
+Exec=google-chrome-stable --profile-directory="Default" --new-window https://fantasy.espn.com/football/team?leagueId=113914867&seasonId=2025&teamId=8&fromTeamId=8
+Terminal=false
+Type=Application
+Icon=/home/ko/.local/share/applications/icons/ESPN Fantasy.png
+StartupNotify=true

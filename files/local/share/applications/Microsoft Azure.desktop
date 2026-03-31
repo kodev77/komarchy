@@ -1,0 +1,9 @@
+[Desktop Entry]
+Version=1.0
+Name=Microsoft Azure
+Comment=Microsoft Azure (RPC profile)
+Exec=google-chrome-stable --profile-directory="Profile 3" --new-window https://portal.azure.com
+Terminal=false
+Type=Application
+Icon=/home/ko/.local/share/applications/icons/Microsoft Azure.png
+StartupNotify=true

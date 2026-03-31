@@ -1,0 +1,197 @@
+#!/usr/bin/env python3
+"""sqlcmd wrapper using pymssql (FreeTDS) for Linux environments where
+ODBC Driver 18 fails due to TLS/encryption issues.
+
+Supports the subset of sqlcmd flags used by vim-dadbod:
+  -S host[,port]   Server
+  -U user           Username (password via SQLCMDPASSWORD env)
+  -P password       Password (alternative to env var)
+  -d database       Database
+  -i file           Input SQL file
+  -Q query          Run query and exit
+  -h -1             Suppress column headers
+  -s sep            Column separator character
+  -W                Remove trailing spaces (default behavior)
+  -C                Trust server certificate (accepted, no-op)
+  -N                Encryption setting (accepted, no-op)
+  -E                Integrated/Windows auth
+  -w width          Column width (accepted, no-op)
+"""
+
+import sys
+import os
+import pymssql
+
+DEBUG_LOG = os.environ.get('SQLCMD_DEBUG')
+def _debug(msg):
+    if DEBUG_LOG:
+        with open(DEBUG_LOG, 'a') as f:
+            f.write(msg + '\n')
+
+def parse_args(argv):
+    opts = {
+        'server': 'localhost',
+        'port': 1433,
+        'user': '',
+        'password': os.environ.get('SQLCMDPASSWORD', ''),
+        'database': '',
+        'query': None,
+        'input_file': None,
+        'no_header': False,
+        'separator': None,
+    }
+
+    i = 1
+    while i < len(argv):
+        arg = argv[i]
+        if arg == '-S' and i + 1 < len(argv):
+            i += 1
+            server = argv[i].removeprefix('tcp:')
+            if ',' in server:
+                parts = server.rsplit(',', 1)
+                opts['server'] = parts[0]
+                opts['port'] = int(parts[1])
+            else:
+                opts['server'] = server
+        elif arg == '-U' and i + 1 < len(argv):
+            i += 1
+            opts['user'] = argv[i]
+        elif arg == '-P' and i + 1 < len(argv):
+            i += 1
+            opts['password'] = argv[i]
+        elif arg == '-d' and i + 1 < len(argv):
+            i += 1
+            opts['database'] = argv[i]
+        elif arg == '-Q' and i + 1 < len(argv):
+            i += 1
+            opts['query'] = argv[i]
+        elif arg == '-i' and i + 1 < len(argv):
+            i += 1
+            opts['input_file'] = argv[i]
+        elif arg == '-h-1':
+            opts['no_header'] = True
+        elif arg == '-h' and i + 1 < len(argv):
+            i += 1
+            if argv[i] == '-1':
+                opts['no_header'] = True
+        elif arg == '-s' and i + 1 < len(argv):
+            i += 1
+            opts['separator'] = argv[i]
+        elif arg in ('-W', '-C', '-E'):
+            pass  # accepted, no-op
+        elif arg == '-N' and i + 1 < len(argv):
+            next_val = argv[i + 1]
+            if not next_val.startswith('-'):
+                i += 1  # consume the value (o, s, m, etc.)
+        elif arg == '-w' and i + 1 < len(argv):
+            i += 1  # consume width value
+        i += 1
+
+    return opts
+
+
+def format_results(cursor, no_header=False, separator=None, nocount=False):
+    """Format query results in sqlcmd-compatible columnar output."""
+    if cursor.description is None:
+        # Non-SELECT statement (INSERT/UPDATE/DELETE)
+        affected = cursor.rowcount
+        if affected >= 0 and not nocount:
+            print(f"\n({affected} rows affected)")
+        return
+
+    columns = [desc[0] for desc in cursor.description]
+    rows = cursor.fetchall()
+
+    if not columns:
+        return
+
+    if separator:
+        # Delimiter mode (e.g. -s |): no padding, use separator between columns
+        if not no_header:
+            print(separator.join(str(c) for c in columns))
+            print(separator.join('-' * len(str(c)) for c in columns))
+
+        for row in rows:
+            vals = [("(NULL)" if val is None else str(val)) for val in row]
+            print(separator.join(vals))
+    else:
+        # Padded columnar mode (default)
+        widths = [len(str(c)) for c in columns]
+        for row in rows:
+            for i, val in enumerate(row):
+                display = "(NULL)" if val is None else str(val)
+                widths[i] = max(widths[i], len(display))
+        widths = [min(w, 256) for w in widths]
+
+        if not no_header:
+            header = ' '.join(str(c).ljust(widths[i]) for i, c in enumerate(columns))
+            sep_line = ' '.join('-' * widths[i] for i in range(len(columns)))
+            print(header)
+            print(sep_line)
+
+        for row in rows:
+            line = ' '.join(
+                ("(NULL)" if val is None else str(val)).ljust(widths[i])
+                for i, val in enumerate(row)
+            )
+            print(line.rstrip())
+
+    if not nocount:
+        print(f"\n({len(rows)} rows affected)")
+
+
+def run_query(conn, sql, no_header=False, separator=None):
+    """Execute SQL and print results for each statement."""
+    _debug(f"--- QUERY (len={len(sql)}) ---\n{sql!r}\n--- END ---")
+    nocount = 'SET NOCOUNT ON' in sql.upper() if sql else False
+    cursor = conn.cursor()
+    try:
+        cursor.execute(sql)
+        format_results(cursor, no_header, separator, nocount)
+        # Handle multiple result sets
+        while cursor.nextset():
+            format_results(cursor, no_header, separator, nocount)
+    except pymssql.Error as e:
+        print(f"Msg 0, Level 0, State 0", file=sys.stderr)
+        print(f"{e}", file=sys.stderr)
+
+
+def main():
+    _debug(f"argv: {sys.argv}")
+    opts = parse_args(sys.argv)
+
+    try:
+        conn_kwargs = {
+            'server': opts['server'],
+            'port': opts['port'],
+            'user': opts['user'],
+            'password': opts['password'],
+            'tds_version': '7.3',
+        }
+        if opts['database']:
+            conn_kwargs['database'] = opts['database']
+
+        conn = pymssql.connect(**conn_kwargs)
+    except pymssql.Error as e:
+        print(f"Sqlcmd: Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        if opts['query']:
+            run_query(conn, opts['query'], opts['no_header'], opts['separator'])
+        elif opts['input_file']:
+            with open(opts['input_file']) as f:
+                sql = f.read()
+            if sql.strip():
+                run_query(conn, sql, opts['no_header'], opts['separator'])
+        else:
+            # Read from stdin
+            sql = sys.stdin.read()
+            if sql.strip():
+                run_query(conn, sql, opts['no_header'], opts['separator'])
+    finally:
+        conn.close()
+
+
+if __name__ == '__main__':
+    main()

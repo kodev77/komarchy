@@ -1,0 +1,9 @@
+[Desktop Entry]
+Version=1.0
+Name=Microsoft Outlook
+Comment=Microsoft Outlook (RPC profile)
+Exec=google-chrome-stable --profile-directory="Profile 3" --new-window https://outlook.cloud.microsoft/mail/inbox
+Terminal=false
+Type=Application
+Icon=/home/ko/.local/share/applications/icons/Microsoft Outlook.png
+StartupNotify=true

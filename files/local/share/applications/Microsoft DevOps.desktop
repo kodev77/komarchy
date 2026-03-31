@@ -1,0 +1,9 @@
+[Desktop Entry]
+Version=1.0
+Name=Microsoft DevOps
+Comment=Microsoft DevOps (RPC profile)
+Exec=google-chrome-stable --profile-directory="Profile 3" --new-window https://dev.azure.com/RPCInc/
+Terminal=false
+Type=Application
+Icon=/home/ko/.local/share/applications/icons/Microsoft DevOps.png
+StartupNotify=true

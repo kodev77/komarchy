@@ -1,0 +1,9 @@
+[Desktop Entry]
+Version=1.0
+Name=LMS - RPC Training
+Comment=LMS - RPC Training (RPC profile)
+Exec=google-chrome-stable --profile-directory="Profile 3" --new-window https://rpc.inclassnow.com/?ReturnUrl=%2Ftraining#
+Terminal=false
+Type=Application
+Icon=/home/ko/.local/share/applications/icons/LMS - RPC Training.png
+StartupNotify=true

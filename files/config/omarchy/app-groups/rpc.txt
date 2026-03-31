@@ -1,0 +1,13 @@
+
+Microsoft Teams|Microsoft Teams.desktop
+Microsoft Outlook|Microsoft Outlook.desktop
+ChatGPT|ChatGPT.desktop
+Claude AI|Claude AI.desktop
+Project Insight|Project Insight.desktop
+Workday RPC|Workday RPC.desktop
+Microsoft Azure|Microsoft Azure.desktop
+Microsoft DevOps|Microsoft DevOps.desktop
+Dynamics FSA - FS01|Dynamics FSA - FS01.desktop
+Dynamics FSA - SIT|Dynamics FSA - SIT.desktop
+PowerBI Training - Matrix|PowerBI Training - Matrix.desktop
+LMS - RPC Training|LMS - RPC Training.desktop

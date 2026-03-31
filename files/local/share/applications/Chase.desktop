@@ -1,0 +1,9 @@
+[Desktop Entry]
+Version=1.0
+Name=Chase
+Comment=Chase (Personal profile)
+Exec=google-chrome-stable --profile-directory="Default" --new-window https://secure.chase.com
+Terminal=false
+Type=Application
+Icon=/home/ko/.local/share/applications/icons/Chase.png
+StartupNotify=true

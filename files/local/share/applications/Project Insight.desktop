@@ -1,0 +1,9 @@
+[Desktop Entry]
+Version=1.0
+Name=Project Insight
+Comment=Project Insight (RPC profile)
+Exec=google-chrome-stable --profile-directory="Profile 3" --new-window https://rpc.projectinsight.net/content/dashboard/default.aspx
+Terminal=false
+Type=Application
+Icon=/home/ko/.local/share/applications/icons/Project Insight.png
+StartupNotify=true

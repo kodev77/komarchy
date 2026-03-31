@@ -1,0 +1,9 @@
+[Desktop Entry]
+Version=1.0
+Name=Yahoo Fantasy
+Comment=Yahoo Fantasy (Personal profile)
+Exec=google-chrome-stable --profile-directory="Default" --new-window https://football.fantasysports.yahoo.com/f1/572201/10
+Terminal=false
+Type=Application
+Icon=/home/ko/.local/share/applications/icons/Yahoo Fantasy.png
+StartupNotify=true

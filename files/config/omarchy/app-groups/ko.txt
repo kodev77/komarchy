@@ -1,0 +1,7 @@
+
+Budget|Budget.desktop
+Gmail|Gmail.desktop
+Chase|Chase.desktop
+YouTube|YouTube.desktop
+ESPN Fantasy|ESPN Fantasy.desktop
+Yahoo Fantasy|Yahoo Fantasy.desktop

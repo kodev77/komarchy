@@ -1,0 +1,9 @@
+[Desktop Entry]
+Version=1.0
+Name=ChatGPT
+Comment=ChatGPT (RPC profile)
+Exec=google-chrome-stable --profile-directory="Profile 3" --new-window https://chatgpt.com
+Terminal=false
+Type=Application
+Icon=/home/ko/.local/share/applications/icons/ChatGPT.png
+StartupNotify=true

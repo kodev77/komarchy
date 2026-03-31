@@ -1,0 +1,12 @@
+[Desktop Entry]
+Version=1.0
+Name=Chrome (Work)
+GenericName=Web Browser
+Comment=Access the Internet - Work Profile
+StartupWMClass=Google-chrome
+Exec=/usr/bin/google-chrome-stable --profile-directory="Profile 3" --new-window %U
+StartupNotify=true
+Terminal=false
+Icon=chromium
+Type=Application
+Categories=Network;WebBrowser;

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Version=1.0
+Name=Workday RPC
+Comment=Workday RPC (RPC profile)
+Exec=google-chrome-stable --profile-directory="Profile 3" --new-window https://www.myworkday.com/rpcinc
+Terminal=false
+Type=Application
+Icon=/home/ko/.local/share/applications/icons/Workday RPC.png
+StartupNotify=true

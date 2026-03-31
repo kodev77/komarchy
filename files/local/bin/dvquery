@@ -1,0 +1,1346 @@
+#!/home/ko/.local/share/dvquery-venv/bin/python3
+"""
+dvquery - Dataverse Query CLI for Linux
+Translates basic SQL SELECT queries to Dataverse Web API (OData) calls.
+
+Usage:
+  dvquery "SELECT TOP 10 name, accountnumber FROM account WHERE name LIKE '%Eagle%'"
+  dvquery -i                          # Interactive mode
+  dvquery -f queries.sql              # Run queries from file (executes non-comment, non-empty lines)
+  dvquery --entities                  # List all entity names
+  dvquery --columns account           # List columns for an entity
+"""
+
+import sys
+import os
+import re
+import json
+import time
+import shutil
+import subprocess
+import readline
+import requests
+from tabulate import tabulate
+from pathlib import Path
+from urllib.parse import urlparse, parse_qs
+
+# ── Pager ──────────────────────────────────────────────────────────────────
+PAGE_THRESHOLD = 40  # rows before paging kicks in
+
+def paged_print(text):
+    """Print text through a pager (less) if it exceeds terminal height."""
+    term_height = shutil.get_terminal_size().lines
+    line_count = text.count("\n") + 1
+    if line_count > term_height - 2:
+        try:
+            proc = subprocess.Popen(["less", "-R", "-S", "-X", "-F"], stdin=subprocess.PIPE)
+            proc.communicate(input=text.encode())
+            return
+        except (FileNotFoundError, BrokenPipeError):
+            pass
+    print(text)
+
+# ── Configuration ──────────────────────────────────────────────────────────
+def load_config(name=None):
+    """Load dataverse connection from dadbod-ui connections.json.
+    If name is given, match by connection name. Otherwise use first dataverse:// entry."""
+    conn_file = Path.home() / ".local/share/db_ui/connections.json"
+    if not conn_file.exists():
+        print(f"Error: No connections file at {conn_file}", file=sys.stderr)
+        sys.exit(1)
+
+    connections = json.loads(conn_file.read_text())
+    for conn in connections:
+        url = conn.get("url", "")
+        if not url.startswith("dataverse://"):
+            continue
+        if name and conn.get("name") != name:
+            continue
+        parsed = urlparse(url)
+        return {
+            "name": conn.get("name", ""),
+            "org_url": f"https://{parsed.hostname}",
+            "client_id": parsed.username,
+            "client_secret": parsed.password,
+            "tenant_id": parse_qs(parsed.query).get("tenant", [""])[0],
+        }
+
+    if name:
+        print(f"Error: No dataverse connection named '{name}' in connections.json", file=sys.stderr)
+    else:
+        print("Error: No dataverse:// connection found in connections.json", file=sys.stderr)
+    sys.exit(1)
+
+CONFIG = None
+
+API_VERSION = "v9.2"
+
+# Token cache
+_token_cache = {"token": None, "expires_at": 0}
+
+# Entity set name cache
+_entity_set_cache = {}
+
+# Lookup attribute cache: { "entity": { "createdby": True, "ownerid": True, ... } }
+_lookup_cache = {}
+
+# ── Auth ───────────────────────────────────────────────────────────────────
+def get_token():
+    now = time.time()
+    if _token_cache["token"] and _token_cache["expires_at"] > now + 60:
+        return _token_cache["token"]
+
+    r = requests.post(
+        f"https://login.microsoftonline.com/{CONFIG['tenant_id']}/oauth2/v2.0/token",
+        data={
+            "grant_type": "client_credentials",
+            "client_id": CONFIG["client_id"],
+            "client_secret": CONFIG["client_secret"],
+            "scope": f"{CONFIG['org_url']}/.default",
+        },
+    )
+    r.raise_for_status()
+    data = r.json()
+    _token_cache["token"] = data["access_token"]
+    _token_cache["expires_at"] = now + data.get("expires_in", 3600)
+    return _token_cache["token"]
+
+
+def api_headers():
+    return {
+        "Authorization": f"Bearer {get_token()}",
+        "OData-MaxVersion": "4.0",
+        "OData-Version": "4.0",
+        "Accept": "application/json",
+        "Prefer": "odata.include-annotations=OData.Community.Display.V1.FormattedValue,odata.maxpagesize=5000",
+    }
+
+
+def api_url(path=""):
+    return f"{CONFIG['org_url']}/api/data/{API_VERSION}/{path}"
+
+
+# ── Entity Set Name Resolution ─────────────────────────────────────────────
+def resolve_entity_set(logical_name):
+    """Resolve a logical entity name to its EntitySetName for the Web API."""
+    ln = logical_name.strip().lower()
+    if ln in _entity_set_cache:
+        return _entity_set_cache[ln]
+
+    # Query metadata
+    resp = requests.get(
+        api_url(f"EntityDefinitions?$select=LogicalName,EntitySetName&$filter=LogicalName eq '{ln}'"),
+        headers=api_headers(),
+    )
+    if resp.status_code == 200:
+        vals = resp.json().get("value", [])
+        if vals:
+            esn = vals[0]["EntitySetName"]
+            _entity_set_cache[ln] = esn
+            return esn
+
+    # Fallback: naive pluralization
+    if ln.endswith("y"):
+        fallback = ln[:-1] + "ies"
+    elif ln.endswith("s"):
+        fallback = ln + "es"
+    else:
+        fallback = ln + "s"
+    _entity_set_cache[ln] = fallback
+    return fallback
+
+
+# ── Lookup Name Field Resolution ──────────────────────────────────────────
+def get_lookup_fields(entity_name):
+    """Get set of lookup attribute LogicalNames for an entity (cached)."""
+    ln = entity_name.strip().lower()
+    if ln in _lookup_cache:
+        return _lookup_cache[ln]
+
+    resp = requests.get(
+        api_url(f"EntityDefinitions(LogicalName='{ln}')/Attributes/Microsoft.Dynamics.CRM.LookupAttributeMetadata"
+                f"?$select=LogicalName"),
+        headers=api_headers(),
+    )
+    lookups = set()
+    if resp.status_code == 200:
+        for a in resp.json().get("value", []):
+            lookups.add(a["LogicalName"])
+    _lookup_cache[ln] = lookups
+    return lookups
+
+
+def resolve_lookup_names(columns, entity_name):
+    """
+    Detect virtual lookup-name fields (e.g. createdbyname, owneridname) and return:
+      - api_columns: columns to actually send in $select (with _xxx_value instead)
+      - name_map: { "createdbyname": "_createdby_value" } for result remapping
+    """
+    if not columns:
+        return columns, {}
+
+    lookups = get_lookup_fields(entity_name)
+    api_columns = []
+    name_map = {}  # user_col -> lookup_value_key
+
+    for col in columns:
+        cl = col.lower()
+        # Check patterns: xxxname or xxxyominame
+        matched = False
+        for suffix in ("yominame", "name"):
+            if cl.endswith(suffix):
+                base = cl[:-len(suffix)]
+                # Check if 'base' is a known lookup on this entity
+                if base in lookups:
+                    lookup_key = f"_{base}_value"
+                    if lookup_key not in api_columns:
+                        api_columns.append(lookup_key)
+                    name_map[col] = lookup_key
+                    matched = True
+                    break
+        if not matched:
+            api_columns.append(col)
+
+    return api_columns, name_map
+
+
+# ── SQL Parser ─────────────────────────────────────────────────────────────
+def parse_sql(sql):
+    """
+    Parse a basic SQL SELECT into OData components.
+    Supports: SELECT [TOP N] [COUNT(*)] columns FROM entity [WHERE ...] [ORDER BY ...]
+    """
+    sql = sql.strip().rstrip(";")
+
+    # Check for COUNT
+    count_match = re.match(
+        r"SELECT\s+COUNT\s*\(\s*\*\s*\)\s+FROM\s+(\w+)(?:\s+WHERE\s+(.+?))?$",
+        sql, re.IGNORECASE,
+    )
+    if count_match:
+        entity = count_match.group(1)
+        where = count_match.group(2)
+        return {"type": "count", "entity": entity, "where": where}
+
+    # Standard SELECT
+    m = re.match(
+        r"SELECT\s+(?:TOP\s+(\d+)\s+)?(.+?)\s+FROM\s+(\w+)"
+        r"(?:\s+WHERE\s+(.+?))?"
+        r"(?:\s+ORDER\s+BY\s+(.+?))?$",
+        sql, re.IGNORECASE | re.DOTALL,
+    )
+    if not m:
+        return None
+
+    top = m.group(1)
+    columns_raw = m.group(2).strip()
+    entity = m.group(3).strip()
+    where_raw = m.group(4)
+    orderby_raw = m.group(5)
+
+    # Parse columns
+    if columns_raw == "*":
+        columns = None
+    else:
+        # Remove * if it's trailing after named columns (XrmToolbox pattern: "col1, col2, *")
+        cols = [c.strip() for c in columns_raw.split(",")]
+        cols = [c for c in cols if c and c != "*"]
+        columns = cols if cols else None
+
+    # Parse WHERE → OData $filter
+    odata_filter = translate_where(where_raw) if where_raw else None
+
+    # Parse ORDER BY
+    odata_orderby = None
+    if orderby_raw:
+        parts = []
+        for part in orderby_raw.split(","):
+            part = part.strip()
+            if re.search(r"\bDESC$", part, re.IGNORECASE):
+                col = re.sub(r"\s+DESC$", "", part, flags=re.IGNORECASE)
+                parts.append(f"{col.strip()} desc")
+            elif re.search(r"\bASC$", part, re.IGNORECASE):
+                col = re.sub(r"\s+ASC$", "", part, flags=re.IGNORECASE)
+                parts.append(f"{col.strip()} asc")
+            else:
+                parts.append(part)
+        odata_orderby = ",".join(parts)
+
+    return {
+        "type": "select",
+        "entity": entity,
+        "columns": columns,
+        "top": int(top) if top else None,
+        "filter": odata_filter,
+        "orderby": odata_orderby,
+    }
+
+
+def translate_where(where_clause):
+    """Translate SQL WHERE clause to OData $filter."""
+    if not where_clause:
+        return None
+
+    clause = where_clause.strip()
+
+    # Split on AND/OR while preserving them, but not inside parentheses
+    # This prevents splitting IN (...) clauses
+    tokens = []
+    depth = 0
+    current = ""
+    i = 0
+    while i < len(clause):
+        ch = clause[i]
+        if ch == "(":
+            depth += 1
+            current += ch
+            i += 1
+        elif ch == ")":
+            depth -= 1
+            current += ch
+            i += 1
+        elif depth == 0:
+            # Check for AND/OR keywords at word boundaries
+            upper_rest = clause[i:].upper()
+            if upper_rest.startswith("AND") and (i + 3 >= len(clause) or not clause[i + 3].isalnum()):
+                if i == 0 or not clause[i - 1].isalnum():
+                    if current.strip():
+                        tokens.append(current.strip())
+                    tokens.append("AND")
+                    current = ""
+                    i += 3
+                    continue
+            if upper_rest.startswith("OR") and (i + 2 >= len(clause) or not clause[i + 2].isalnum()):
+                if i == 0 or not clause[i - 1].isalnum():
+                    if current.strip():
+                        tokens.append(current.strip())
+                    tokens.append("OR")
+                    current = ""
+                    i += 2
+                    continue
+            current += ch
+            i += 1
+        else:
+            current += ch
+            i += 1
+    if current.strip():
+        tokens.append(current.strip())
+
+    parts = []
+    for token in tokens:
+        token = token.strip()
+        if not token:
+            continue
+        if token.upper() in ("AND", "OR"):
+            parts.append(token.lower())
+            continue
+        parts.append(translate_condition(token))
+
+    return " ".join(parts)
+
+
+def translate_condition(cond):
+    """Translate a single SQL condition to OData filter."""
+    cond = cond.strip()
+
+    # IS NOT NULL
+    m = re.match(r"(\w+)\s+IS\s+NOT\s+NULL", cond, re.IGNORECASE)
+    if m:
+        return f"{m.group(1)} ne null"
+
+    # IS NULL
+    m = re.match(r"(\w+)\s+IS\s+NULL", cond, re.IGNORECASE)
+    if m:
+        return f"{m.group(1)} eq null"
+
+    # LIKE '%value%' → contains
+    m = re.match(r"(\w+)\s+LIKE\s+'%(.+?)%'", cond, re.IGNORECASE)
+    if m:
+        return f"contains({m.group(1)},'{m.group(2)}')"
+
+    # LIKE 'value%' → startswith
+    m = re.match(r"(\w+)\s+LIKE\s+'(.+?)%'", cond, re.IGNORECASE)
+    if m:
+        return f"startswith({m.group(1)},'{m.group(2)}')"
+
+    # LIKE '%value' → endswith
+    m = re.match(r"(\w+)\s+LIKE\s+'%(.+?)'", cond, re.IGNORECASE)
+    if m:
+        return f"endswith({m.group(1)},'{m.group(2)}')"
+
+    # NOT LIKE '%value%'
+    m = re.match(r"(\w+)\s+NOT\s+LIKE\s+'%(.+?)%'", cond, re.IGNORECASE)
+    if m:
+        return f"not contains({m.group(1)},'{m.group(2)}')"
+
+    # IN ('val1','val2','val3') → col eq 'val1' or col eq 'val2' or col eq 'val3'
+    m = re.match(r"(\w+)\s+IN\s*\((.+?)\)", cond, re.IGNORECASE)
+    if m:
+        col = m.group(1)
+        vals_raw = m.group(2)
+        vals = re.findall(r"'(.*?)'", vals_raw)
+        if vals:
+            clauses = [f"{col} eq '{v}'" for v in vals]
+            return "(" + " or ".join(clauses) + ")"
+
+    # NOT IN ('val1','val2') → col ne 'val1' and col ne 'val2'
+    m = re.match(r"(\w+)\s+NOT\s+IN\s*\((.+?)\)", cond, re.IGNORECASE)
+    if m:
+        col = m.group(1)
+        vals_raw = m.group(2)
+        vals = re.findall(r"'(.*?)'", vals_raw)
+        if vals:
+            clauses = [f"{col} ne '{v}'" for v in vals]
+            return "(" + " and ".join(clauses) + ")"
+
+    # col = 'value' (string, including empty string '')
+    m = re.match(r"(\w+)\s*=\s*'(.*?)'", cond)
+    if m:
+        return f"{m.group(1)} eq '{m.group(2)}'"
+
+    # col != 'value' or col <> 'value'
+    m = re.match(r"(\w+)\s*(?:!=|<>)\s*'(.*?)'", cond)
+    if m:
+        return f"{m.group(1)} ne '{m.group(2)}'"
+
+    # col = guid (no quotes, looks like a GUID)
+    m = re.match(r"(\w+)\s*=\s*'?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})'?", cond, re.IGNORECASE)
+    if m:
+        return f"{m.group(1)} eq '{m.group(2)}'"
+
+    # col >/>=/</<= number
+    m = re.match(r"(\w+)\s*(>=|<=|>|<|=|!=)\s*(\d+(?:\.\d+)?)", cond)
+    if m:
+        ops = {">=": "ge", "<=": "le", ">": "gt", "<": "lt", "=": "eq", "!=": "ne"}
+        return f"{m.group(1)} {ops.get(m.group(2), m.group(2))} {m.group(3)}"
+
+    # Fallback: return as-is (user can fix)
+    return cond
+
+
+# ── Query Execution ────────────────────────────────────────────────────────
+def execute_query(parsed):
+    """Execute a parsed query against the Dataverse Web API."""
+    entity_set = resolve_entity_set(parsed["entity"])
+
+    if parsed["type"] == "count":
+        url = api_url(f"{entity_set}/$count")
+        if parsed.get("where"):
+            filt = translate_where(parsed["where"])
+            url += f"?$filter={filt}"
+        resp = requests.get(url, headers=api_headers())
+        resp.raise_for_status()
+        count_text = resp.content.decode("utf-8-sig").strip()  # strip BOM
+        return {"_type": "count", "count": count_text, "entity": parsed["entity"]}
+
+    # Resolve lookup name fields (e.g. createdbyname → _createdby_value)
+    name_map = {}
+    api_columns = parsed.get("columns")
+    if api_columns:
+        api_columns, name_map = resolve_lookup_names(api_columns, parsed["entity"])
+
+    # Build OData query
+    params = {}
+    if api_columns:
+        params["$select"] = ",".join(api_columns)
+    if parsed.get("top"):
+        params["$top"] = str(parsed["top"])
+    if parsed.get("filter"):
+        params["$filter"] = parsed["filter"]
+    if parsed.get("orderby"):
+        params["$orderby"] = parsed["orderby"]
+
+    url = api_url(entity_set)
+    resp = requests.get(url, headers=api_headers(), params=params)
+
+    if resp.status_code != 200:
+        return {"_type": "error", "status": resp.status_code, "detail": resp.text[:500]}
+
+    data = resp.json()
+    rows = data.get("value", [])
+
+    # Build set of lookup value keys we need to extract formatted values from
+    lookup_value_keys = set(name_map.values())
+    # Reverse map: _createdby_value -> createdbyname (user's requested column)
+    reverse_map = {v: k for k, v in name_map.items()}
+
+    # Clean up OData annotations from rows for display
+    # But preserve formatted values for lookup name fields
+    clean_rows = []
+    for row in rows:
+        clean = {}
+        # First pass: collect formatted values for lookup name fields
+        formatted = {}
+        for k, v in row.items():
+            annot_suffix = "@OData.Community.Display.V1.FormattedValue"
+            if k.endswith(annot_suffix):
+                base_key = k[:-len(annot_suffix)]
+                if base_key in lookup_value_keys:
+                    user_col = reverse_map[base_key]
+                    formatted[user_col] = v
+
+        # Second pass: build clean row
+        for k, v in row.items():
+            # Skip any OData annotation keys (contain @)
+            if "@" in k:
+                continue
+            if k.startswith("_") and k.endswith("_value"):
+                # If this lookup was requested as a name field, use the formatted value
+                if k in lookup_value_keys:
+                    user_col = reverse_map[k]
+                    clean[user_col] = clean_value(formatted.get(user_col, v))
+                # Otherwise skip it (raw lookup GUID not requested)
+                continue
+            clean[k] = clean_value(v)
+        clean_rows.append(clean)
+
+    # If user specified columns, only return those (Dataverse always includes the PK)
+    if parsed.get("columns"):
+        requested = list(parsed["columns"])  # original user columns (e.g. createdbyname)
+        filtered_rows = []
+        for row in clean_rows:
+            filtered_rows.append({col: row.get(col) for col in requested if col in row})
+        clean_rows = filtered_rows
+
+    return {"_type": "results", "rows": clean_rows, "count": len(clean_rows), "entity": parsed["entity"]}
+
+
+def format_results(result, max_col_width=50):
+    """Format query results for display."""
+    if result["_type"] == "count":
+        return f"\n  COUNT({result['entity']}): {result['count']}\n"
+
+    if result["_type"] == "error":
+        return f"\n  ERROR ({result['status']}): {result['detail']}\n"
+
+    rows = result["rows"]
+    if not rows:
+        return f"\n  No results found for {result['entity']}.\n"
+
+    # Sort columns alphabetically with primary key first
+    sorted_keys = sorted(rows[0].keys(), key=str.lower)
+    pk = resolve_primary_key(result.get("entity", ""))
+    if pk in sorted_keys:
+        sorted_keys.remove(pk)
+        sorted_keys.insert(0, pk)
+
+    # Truncate long values for display
+    display_rows = []
+    for row in rows:
+        display = {}
+        for k in sorted_keys:
+            v = row.get(k)
+            if v is None:
+                display[k] = ""
+            elif isinstance(v, str) and len(v) > max_col_width:
+                display[k] = v[:max_col_width - 3] + "..."
+            else:
+                display[k] = v
+        display_rows.append(display)
+
+    table = tabulate(display_rows, headers="keys", tablefmt="simple", maxcolwidths=max_col_width)
+    return f"\n  ({result['count']} rows)\n{table}\n"
+
+
+# Invisible Unicode control characters that break column alignment
+_INVISIBLE_RE = re.compile(
+    "[\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff\u00ad\u034f\u061c\u180e]"
+)
+
+
+def clean_value(v):
+    """Strip invisible Unicode control characters from a value."""
+    if isinstance(v, str):
+        return _INVISIBLE_RE.sub("", v)
+    return v
+
+
+def vim_cell(v):
+    """Format a value for pipe-delimited output for vim-dadbod."""
+    if v is None:
+        return "NULL"
+    s = clean_value(str(v)).replace("|", "/").replace("\n", " ")
+    return s if s else " "
+
+
+def format_results_vim(result):
+    """Format query results as pipe-delimited output for vim-dadbod."""
+    if result["_type"] == "count":
+        return "| count |\n| {} |".format(result["count"])
+
+    if result["_type"] == "error":
+        return f"Error: {result['detail']}"
+
+    rows = result["rows"]
+    if not rows:
+        return "(0 rows affected)"
+
+    # Header row - sort alphabetically with primary key first
+    headers = sorted(rows[0].keys(), key=str.lower)
+    pk = resolve_primary_key(result.get("entity", ""))
+    if pk in headers:
+        headers.remove(pk)
+        headers.insert(0, pk)
+    lines = ["| " + " | ".join(headers) + " |"]
+
+    # Data rows
+    for row in rows:
+        cells = [vim_cell(row.get(h)) for h in headers]
+        lines.append("| " + " | ".join(cells) + " |")
+
+    lines.append(f"({len(rows)} rows affected)")
+    return "\n".join(lines)
+
+
+def format_write_tsv(message):
+    """Format write operation result for vim-dadbod."""
+    return message
+
+
+# ── Metadata Commands ──────────────────────────────────────────────────────
+def list_entities(filter_str=None):
+    """List all entity logical names and their EntitySetNames."""
+    params = {"$select": "LogicalName,EntitySetName,DisplayName", "$orderby": "LogicalName"}
+    if filter_str:
+        params["$filter"] = f"contains(LogicalName,'{filter_str.lower()}')"
+
+    resp = requests.get(api_url("EntityDefinitions"), headers=api_headers(), params=params)
+    resp.raise_for_status()
+    rows = []
+    for e in resp.json()["value"]:
+        display = ""
+        if e.get("DisplayName") and e["DisplayName"].get("UserLocalizedLabel"):
+            display = e["DisplayName"]["UserLocalizedLabel"].get("Label", "")
+        rows.append({"LogicalName": e["LogicalName"], "EntitySetName": e["EntitySetName"], "DisplayName": display})
+    print(f"\n  ({len(rows)} entities)")
+    print(tabulate(rows, headers="keys", tablefmt="simple"))
+    print()
+
+
+def list_columns(entity_name):
+    """List columns for an entity."""
+    resp = requests.get(
+        api_url(f"EntityDefinitions(LogicalName='{entity_name}')/Attributes"
+                f"?$select=LogicalName,AttributeTypeName,DisplayName,Description&$orderby=LogicalName"),
+        headers=api_headers(),
+    )
+    if resp.status_code != 200:
+        print(f"  Error: {resp.status_code} - {resp.text[:200]}")
+        return
+
+    rows = []
+    for a in resp.json()["value"]:
+        display = ""
+        if a.get("DisplayName") and a["DisplayName"].get("UserLocalizedLabel"):
+            display = a["DisplayName"]["UserLocalizedLabel"].get("Label", "")
+        desc = ""
+        if a.get("Description") and a["Description"].get("UserLocalizedLabel"):
+            desc = a["Description"]["UserLocalizedLabel"].get("Label", "")
+        type_name = a.get("AttributeTypeName", {}).get("Value", "")
+        rows.append({
+            "LogicalName": a["LogicalName"],
+            "Type": type_name,
+            "DisplayName": display,
+            "Description": desc[:60] if desc else "",
+        })
+    print(f"\n  ({len(rows)} columns for '{entity_name}')")
+    print(tabulate(rows, headers="keys", tablefmt="simple"))
+    print()
+
+
+# ── Write Operations ───────────────────────────────────────────────────────
+def resolve_primary_key(entity_name):
+    """Get the primary key column name for an entity (usually entitynameid)."""
+    return f"{entity_name.lower()}id"
+
+
+def parse_value(val):
+    """Parse a SQL value literal into a Python value."""
+    val = val.strip()
+    if val.upper() == "NULL":
+        return None
+    # Strip surrounding quotes
+    if (val.startswith("'") and val.endswith("'")) or (val.startswith('"') and val.endswith('"')):
+        return val[1:-1]
+    # Number
+    try:
+        if "." in val:
+            return float(val)
+        return int(val)
+    except ValueError:
+        return val
+
+
+def parse_insert(sql):
+    """Parse INSERT INTO entity (cols) VALUES (vals)"""
+    sql = sql.strip().rstrip(";")
+    m = re.match(
+        r"INSERT\s+INTO\s+(\w+)\s*\((.+?)\)\s*VALUES\s*\((.+?)\)\s*$",
+        sql, re.IGNORECASE | re.DOTALL,
+    )
+    if not m:
+        return None
+
+    entity = m.group(1)
+    columns = [c.strip() for c in m.group(2).split(",")]
+
+    # Parse values carefully (handle commas inside quoted strings)
+    values_raw = m.group(3)
+    values = []
+    current = ""
+    in_quote = False
+    for ch in values_raw:
+        if ch == "'" and not in_quote:
+            in_quote = True
+            current += ch
+        elif ch == "'" and in_quote:
+            in_quote = False
+            current += ch
+        elif ch == "," and not in_quote:
+            values.append(parse_value(current))
+            current = ""
+        else:
+            current += ch
+    if current.strip():
+        values.append(parse_value(current))
+
+    if len(columns) != len(values):
+        return None
+
+    return {"type": "insert", "entity": entity, "data": dict(zip(columns, values))}
+
+
+def parse_update(sql):
+    """Parse UPDATE entity SET col=val, col=val WHERE condition"""
+    sql = sql.strip().rstrip(";")
+    m = re.match(
+        r"UPDATE\s+(\w+)\s+SET\s+(.+?)\s+WHERE\s+(.+)$",
+        sql, re.IGNORECASE | re.DOTALL,
+    )
+    if not m:
+        return None
+
+    entity = m.group(1)
+    set_clause = m.group(2).strip()
+    where_clause = m.group(3).strip()
+
+    # Parse SET assignments
+    data = {}
+    # Split on commas not inside quotes
+    assignments = []
+    current = ""
+    in_quote = False
+    for ch in set_clause:
+        if ch == "'" and not in_quote:
+            in_quote = True
+            current += ch
+        elif ch == "'" and in_quote:
+            in_quote = False
+            current += ch
+        elif ch == "," and not in_quote:
+            assignments.append(current.strip())
+            current = ""
+        else:
+            current += ch
+    if current.strip():
+        assignments.append(current.strip())
+
+    for assign in assignments:
+        parts = assign.split("=", 1)
+        if len(parts) == 2:
+            col = parts[0].strip()
+            val = parse_value(parts[1])
+            data[col] = val
+
+    return {"type": "update", "entity": entity, "data": data, "where": where_clause}
+
+
+def parse_delete(sql):
+    """Parse DELETE FROM entity WHERE condition"""
+    sql = sql.strip().rstrip(";")
+    m = re.match(
+        r"DELETE\s+FROM\s+(\w+)\s+WHERE\s+(.+)$",
+        sql, re.IGNORECASE | re.DOTALL,
+    )
+    if not m:
+        return None
+
+    return {"type": "delete", "entity": m.group(1), "where": m.group(2).strip()}
+
+
+def confirm(prompt):
+    """Ask user for y/n confirmation."""
+    try:
+        resp = input(f"  {prompt} (y/n): ").strip().lower()
+        return resp in ("y", "yes")
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False
+
+
+def execute_insert(parsed):
+    """Execute an INSERT via POST to the Web API."""
+    entity_set = resolve_entity_set(parsed["entity"])
+    pk = resolve_primary_key(parsed["entity"])
+
+    print(f"\n  INSERT INTO {parsed['entity']}:")
+    for k, v in parsed["data"].items():
+        print(f"    {k} = {repr(v)}")
+
+    if not confirm("Execute this INSERT?"):
+        print("  Cancelled.")
+        return
+
+    headers = api_headers()
+    headers["Content-Type"] = "application/json"
+    headers["Prefer"] = "return=representation"
+
+    resp = requests.post(api_url(entity_set), headers=headers, json=parsed["data"])
+
+    if resp.status_code in (200, 201, 204):
+        print(f"  SUCCESS: Record created in {parsed['entity']}.")
+        if resp.status_code in (200, 201) and resp.text:
+            data = resp.json()
+            record_id = data.get(pk, "unknown")
+            print(f"  {pk}: {record_id}")
+    else:
+        error = resp.json() if resp.text else {}
+        msg = error.get("error", {}).get("message", resp.text[:300])
+        print(f"  FAILED ({resp.status_code}): {msg}")
+
+
+def execute_update(parsed):
+    """Execute an UPDATE via PATCH to the Web API."""
+    entity_set = resolve_entity_set(parsed["entity"])
+    pk = resolve_primary_key(parsed["entity"])
+    where = parsed["where"]
+
+    # Check if WHERE is on the primary key directly
+    pk_match = re.match(rf"{pk}\s*=\s*'?([0-9a-f]{{8}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{12}})'?", where, re.IGNORECASE)
+
+    if pk_match:
+        record_ids = [pk_match.group(1)]
+    else:
+        # Query to find matching records
+        odata_filter = translate_where(where)
+        resp = requests.get(api_url(entity_set), headers=api_headers(), params={"$filter": odata_filter, "$select": pk, "$top": "100"})
+        if resp.status_code != 200:
+            print(f"  Error querying records: {resp.status_code} - {resp.text[:200]}")
+            return
+        rows = resp.json().get("value", [])
+        if not rows:
+            print(f"  No records match WHERE {where}")
+            return
+        record_ids = [row[pk] for row in rows]
+
+    print(f"\n  UPDATE {parsed['entity']} ({len(record_ids)} record{'s' if len(record_ids) != 1 else ''}):")
+    print(f"  WHERE: {where}")
+    for k, v in parsed["data"].items():
+        print(f"    SET {k} = {repr(v)}")
+
+    if not confirm(f"Update {len(record_ids)} record(s)?"):
+        print("  Cancelled.")
+        return
+
+    headers = api_headers()
+    headers["Content-Type"] = "application/json"
+    success = 0
+    for rid in record_ids:
+        resp = requests.patch(api_url(f"{entity_set}({rid})"), headers=headers, json=parsed["data"])
+        if resp.status_code in (200, 204):
+            success += 1
+        else:
+            error = resp.json() if resp.text else {}
+            msg = error.get("error", {}).get("message", resp.text[:200])
+            print(f"  FAILED on {rid}: ({resp.status_code}) {msg}")
+
+    print(f"  Done: {success}/{len(record_ids)} updated.")
+
+
+def execute_delete(parsed):
+    """Execute a DELETE via DELETE requests to the Web API."""
+    entity_set = resolve_entity_set(parsed["entity"])
+    pk = resolve_primary_key(parsed["entity"])
+    where = parsed["where"]
+
+    # Check if WHERE is on the primary key directly
+    pk_match = re.match(rf"{pk}\s*=\s*'?([0-9a-f]{{8}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{12}})'?", where, re.IGNORECASE)
+
+    if pk_match:
+        record_ids = [pk_match.group(1)]
+    else:
+        # Query to find matching records - show a preview
+        odata_filter = translate_where(where)
+        resp = requests.get(api_url(entity_set), headers=api_headers(), params={"$filter": odata_filter, "$top": "200"})
+        if resp.status_code != 200:
+            print(f"  Error querying records: {resp.status_code} - {resp.text[:200]}")
+            return
+        rows = resp.json().get("value", [])
+        if not rows:
+            print(f"  No records match WHERE {where}")
+            return
+        record_ids = [row[pk] for row in rows]
+
+        # Show preview of what will be deleted
+        clean_rows = []
+        for row in rows[:10]:  # Show first 10
+            clean = {k: v for k, v in row.items() if not k.startswith("@") and not (k.startswith("_") and k.endswith("_value"))}
+            clean_rows.append(clean)
+        print(f"\n  Records to DELETE from {parsed['entity']} ({len(record_ids)} total):")
+        # Show a compact preview with just a few columns
+        preview_cols = [pk]
+        for key in clean_rows[0]:
+            if key != pk and len(preview_cols) < 4:
+                preview_cols.append(key)
+        preview = [{k: row.get(k, "") for k in preview_cols} for row in clean_rows]
+        print(tabulate(preview, headers="keys", tablefmt="simple", maxcolwidths=40))
+        if len(record_ids) > 10:
+            print(f"  ... and {len(record_ids) - 10} more")
+
+    print(f"\n  DELETE FROM {parsed['entity']} WHERE {where}")
+    print(f"  ({len(record_ids)} record{'s' if len(record_ids) != 1 else ''} will be deleted)")
+
+    if not confirm(f"DELETE {len(record_ids)} record(s)? This cannot be undone"):
+        print("  Cancelled.")
+        return
+
+    headers = api_headers()
+    success = 0
+    for rid in record_ids:
+        resp = requests.delete(api_url(f"{entity_set}({rid})"), headers=headers)
+        if resp.status_code in (200, 204):
+            success += 1
+        else:
+            error = resp.json() if resp.text else {}
+            msg = error.get("error", {}).get("message", resp.text[:200])
+            print(f"  FAILED on {rid}: ({resp.status_code}) {msg}")
+
+    print(f"  Done: {success}/{len(record_ids)} deleted.")
+
+
+# ── Raw OData ──────────────────────────────────────────────────────────────
+def raw_odata(path):
+    """Execute a raw OData path, e.g. accounts?$top=5&$select=name"""
+    resp = requests.get(api_url(path), headers=api_headers())
+    if resp.status_code != 200:
+        print(f"  Error: {resp.status_code} - {resp.text[:300]}")
+        return
+    data = resp.json()
+    if "value" in data:
+        rows = []
+        for row in data["value"]:
+            clean = {k: v for k, v in row.items() if not k.startswith("@") and not (k.startswith("_") and k.endswith("_value"))}
+            rows.append(clean)
+        if rows:
+            print(f"\n  ({len(rows)} rows)")
+            print(tabulate(rows, headers="keys", tablefmt="simple", maxcolwidths=50))
+        else:
+            print("  No results.")
+    else:
+        print(json.dumps(data, indent=2))
+    print()
+
+
+# ── REPL ───────────────────────────────────────────────────────────────────
+HELP_TEXT = """
+  dvquery - Dataverse Query CLI
+
+  Options:
+    -c <name>               Use a specific connection by name from connections.json
+
+  Commands:
+    SELECT ...              Run a SQL-like query (same syntax as XrmToolbox SQL 4 CDS)
+    INSERT INTO ...         Insert a record (with confirmation prompt)
+    UPDATE ... SET ... WHERE ...   Update records (with confirmation prompt)
+    DELETE FROM ... WHERE ...      Delete records (with confirmation prompt)
+    .entities [filter]      List entity names (optional filter)
+    .columns <entity>       List columns for an entity
+    .odata <path>           Run a raw OData query path
+    .json                   Toggle JSON output mode
+    .help                   Show this help
+    .quit / .exit           Exit
+
+  SELECT Examples:
+    SELECT COUNT(*) FROM account
+    SELECT TOP 10 name, accountnumber FROM account WHERE name LIKE '%Eagle%'
+    SELECT TOP 5 quoteid, name FROM quote ORDER BY createdon DESC
+
+  INSERT Example:
+    INSERT INTO account (name, accountnumber) VALUES ('Test Corp', 'T001')
+
+  UPDATE Example:
+    UPDATE account SET name = 'New Name' WHERE accountid = '816c8227-...'
+
+  DELETE Example:
+    DELETE FROM account WHERE msdyn_identificationnumber = 'J8675309'
+
+  Note: All write operations require confirmation before executing.
+        DELETE/UPDATE with non-PK WHERE clauses will query first and show a preview.
+"""
+
+
+def run_interactive():
+    """Run interactive REPL mode."""
+    label = CONFIG.get('name', CONFIG['org_url'])
+    print(f"\n  dvquery - Dataverse Query CLI (connected to {label})")
+    print("  Type .help for commands, .quit to exit\n")
+
+    json_mode = False
+    history_file = Path.home() / ".dvquery_history"
+    try:
+        readline.read_history_file(history_file)
+    except FileNotFoundError:
+        pass
+    readline.set_history_length(500)
+
+    while True:
+        try:
+            line = input("dvquery> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+
+        if not line or line.startswith("--"):
+            continue
+
+        try:
+            readline.write_history_file(history_file)
+        except Exception:
+            pass
+
+        # Commands
+        if line.lower() in (".quit", ".exit", "quit", "exit"):
+            break
+        elif line.lower() == ".help":
+            print(HELP_TEXT)
+        elif line.lower() == ".json":
+            json_mode = not json_mode
+            print(f"  JSON output: {'ON' if json_mode else 'OFF'}")
+        elif line.lower().startswith(".entities"):
+            parts = line.split(maxsplit=1)
+            filt = parts[1] if len(parts) > 1 else None
+            list_entities(filt)
+        elif line.lower().startswith(".columns"):
+            parts = line.split(maxsplit=1)
+            if len(parts) < 2:
+                print("  Usage: .columns <entity_name>")
+            else:
+                list_columns(parts[1].strip())
+        elif line.lower().startswith(".odata"):
+            parts = line.split(maxsplit=1)
+            if len(parts) < 2:
+                print("  Usage: .odata <path>")
+            else:
+                raw_odata(parts[1].strip())
+        elif re.match(r"SELECT\b", line, re.IGNORECASE):
+            parsed = parse_sql(line)
+            if not parsed:
+                print("  Could not parse SQL. Try .help for examples.")
+                continue
+            try:
+                result = execute_query(parsed)
+                if json_mode:
+                    paged_print(json.dumps(result, indent=2, default=str))
+                else:
+                    paged_print(format_results(result))
+            except requests.exceptions.HTTPError as e:
+                print(f"  HTTP Error: {e}")
+                print(f"  Response: {e.response.text[:300] if e.response else 'N/A'}")
+            except Exception as e:
+                print(f"  Error: {e}")
+        elif re.match(r"INSERT\b", line, re.IGNORECASE):
+            parsed = parse_insert(line)
+            if not parsed:
+                print("  Could not parse INSERT. Expected: INSERT INTO entity (col1, col2) VALUES ('val1', 'val2')")
+                continue
+            try:
+                execute_insert(parsed)
+            except Exception as e:
+                print(f"  Error: {e}")
+        elif re.match(r"UPDATE\b", line, re.IGNORECASE):
+            parsed = parse_update(line)
+            if not parsed:
+                print("  Could not parse UPDATE. Expected: UPDATE entity SET col = 'val' WHERE condition")
+                continue
+            try:
+                execute_update(parsed)
+            except Exception as e:
+                print(f"  Error: {e}")
+        elif re.match(r"DELETE\b", line, re.IGNORECASE):
+            parsed = parse_delete(line)
+            if not parsed:
+                print("  Could not parse DELETE. Expected: DELETE FROM entity WHERE condition")
+                continue
+            try:
+                execute_delete(parsed)
+            except Exception as e:
+                print(f"  Error: {e}")
+        else:
+            print(f"  Unknown command: {line[:50]}. Type .help for usage.")
+
+
+# ── Vim/Dadbod Mode ────────────────────────────────────────────────────────
+def run_vim_file(filepath):
+    """Execute a SQL file in vim-dadbod mode (tab-delimited output)."""
+    with open(filepath) as f:
+        lines = f.readlines()
+
+    # Join all non-comment, non-empty lines into a single query
+    query_parts = []
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("--"):
+            continue
+        query_parts.append(line)
+    query = " ".join(query_parts)
+
+    if not query:
+        return
+
+    # Handle SELECT
+    if re.match(r"SELECT\b", query, re.IGNORECASE):
+        parsed = parse_sql(query)
+        if not parsed:
+            print(f"Error: could not parse query", file=sys.stderr)
+            sys.exit(1)
+        result = execute_query(parsed)
+        print(format_results_vim(result))
+    elif re.match(r"INSERT\b", query, re.IGNORECASE):
+        parsed = parse_insert(query)
+        if not parsed:
+            print("Error: could not parse INSERT", file=sys.stderr)
+            sys.exit(1)
+        entity_set = resolve_entity_set(parsed["entity"])
+        pk = resolve_primary_key(parsed["entity"])
+        headers = api_headers()
+        headers["Content-Type"] = "application/json"
+        headers["Prefer"] = "return=representation"
+        resp = requests.post(api_url(entity_set), headers=headers, json=parsed["data"])
+        if resp.status_code in (200, 201, 204):
+            if resp.status_code in (200, 201) and resp.text:
+                data = resp.json()
+                record_id = data.get(pk, "")
+                print(f"result\n1 row inserted ({pk}: {record_id})")
+            else:
+                print("result\n1 row inserted")
+        else:
+            error = resp.json() if resp.text else {}
+            msg = error.get("error", {}).get("message", resp.text[:300])
+            print(f"Error: {msg}")
+    elif re.match(r"UPDATE\b", query, re.IGNORECASE):
+        parsed = parse_update(query)
+        if not parsed:
+            print("Error: could not parse UPDATE", file=sys.stderr)
+            sys.exit(1)
+        entity_set = resolve_entity_set(parsed["entity"])
+        pk = resolve_primary_key(parsed["entity"])
+        where = parsed["where"]
+        pk_match = re.match(rf"{pk}\s*=\s*'?([0-9a-f]{{8}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{12}})'?", where, re.IGNORECASE)
+        if pk_match:
+            record_ids = [pk_match.group(1)]
+        else:
+            odata_filter = translate_where(where)
+            resp = requests.get(api_url(entity_set), headers=api_headers(), params={"$filter": odata_filter, "$select": pk, "$top": "200"})
+            if resp.status_code != 200:
+                print(f"Error: {resp.text[:300]}")
+                sys.exit(1)
+            record_ids = [row[pk] for row in resp.json().get("value", [])]
+        if not record_ids:
+            print(f"result\n0 rows updated")
+            return
+        headers = api_headers()
+        headers["Content-Type"] = "application/json"
+        success = 0
+        for rid in record_ids:
+            resp = requests.patch(api_url(f"{entity_set}({rid})"), headers=headers, json=parsed["data"])
+            if resp.status_code in (200, 204):
+                success += 1
+        print(f"result\n{success} row(s) updated")
+    elif re.match(r"DELETE\b", query, re.IGNORECASE):
+        parsed = parse_delete(query)
+        if not parsed:
+            print("Error: could not parse DELETE", file=sys.stderr)
+            sys.exit(1)
+        entity_set = resolve_entity_set(parsed["entity"])
+        pk = resolve_primary_key(parsed["entity"])
+        where = parsed["where"]
+        pk_match = re.match(rf"{pk}\s*=\s*'?([0-9a-f]{{8}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{12}})'?", where, re.IGNORECASE)
+        if pk_match:
+            record_ids = [pk_match.group(1)]
+        else:
+            odata_filter = translate_where(where)
+            resp = requests.get(api_url(entity_set), headers=api_headers(), params={"$filter": odata_filter, "$select": pk, "$top": "200"})
+            if resp.status_code != 200:
+                print(f"Error: {resp.text[:300]}")
+                sys.exit(1)
+            record_ids = [row[pk] for row in resp.json().get("value", [])]
+        if not record_ids:
+            print(f"result\n0 rows deleted")
+            return
+        headers = api_headers()
+        success = 0
+        for rid in record_ids:
+            resp = requests.delete(api_url(f"{entity_set}({rid})"), headers=headers)
+            if resp.status_code in (200, 204):
+                success += 1
+        print(f"result\n{success} row(s) deleted")
+    elif query.startswith(".columns"):
+        parts = query.split(maxsplit=1)
+        if len(parts) < 2:
+            print("Error: usage: .columns <entity_name>", file=sys.stderr)
+            sys.exit(1)
+        entity_name = parts[1].strip()
+        resp = requests.get(
+            api_url(f"EntityDefinitions(LogicalName='{entity_name}')/Attributes"
+                    f"?$select=LogicalName,AttributeTypeName,DisplayName"),
+            headers=api_headers(),
+        )
+        if resp.status_code != 200:
+            print(f"Error: {resp.text[:200]}")
+            sys.exit(1)
+        attrs = resp.json()["value"]
+        print("| LogicalName | Type | DisplayName |")
+        for a in sorted(attrs, key=lambda x: x["LogicalName"]):
+            display = ""
+            if a.get("DisplayName") and a["DisplayName"].get("UserLocalizedLabel"):
+                display = a["DisplayName"]["UserLocalizedLabel"].get("Label", "")
+            type_name = a.get("AttributeTypeName", {}).get("Value", "")
+            print(f"| {vim_cell(a['LogicalName'])} | {vim_cell(type_name)} | {vim_cell(display)} |")
+        print(f"({len(attrs)} rows affected)")
+    elif query.startswith(".entities"):
+        parts = query.split(maxsplit=1)
+        filt = parts[1].strip() if len(parts) > 1 else None
+        params = {"$select": "LogicalName,EntitySetName,DisplayName"}
+        if filt:
+            params["$filter"] = f"contains(LogicalName,'{filt.lower()}')"
+        resp = requests.get(api_url("EntityDefinitions"), headers=api_headers(), params=params)
+        resp.raise_for_status()
+        entities = resp.json()["value"]
+        print("| LogicalName | EntitySetName | DisplayName |")
+        for e in sorted(entities, key=lambda x: x["LogicalName"]):
+            display = ""
+            if e.get("DisplayName") and e["DisplayName"].get("UserLocalizedLabel"):
+                display = e["DisplayName"]["UserLocalizedLabel"].get("Label", "")
+            print(f"| {vim_cell(e['LogicalName'])} | {vim_cell(e['EntitySetName'])} | {vim_cell(display)} |")
+        print(f"({len(entities)} rows affected)")
+    else:
+        print(f"Error: unsupported query type", file=sys.stderr)
+        sys.exit(1)
+
+
+def list_tables_plain():
+    """List entity names, one per line (for vim-dadbod sidebar)."""
+    resp = requests.get(
+        api_url("EntityDefinitions?$select=LogicalName"),
+        headers=api_headers(),
+    )
+    resp.raise_for_status()
+    names = sorted(e["LogicalName"] for e in resp.json()["value"])
+    for name in names:
+        print(name)
+
+
+def list_columns_plain(entity_name):
+    """List column names, one per line (for vim-dadbod completion)."""
+    resp = requests.get(
+        api_url(f"EntityDefinitions(LogicalName='{entity_name}')/Attributes"
+                f"?$select=LogicalName&$orderby=LogicalName"),
+        headers=api_headers(),
+    )
+    if resp.status_code == 200:
+        for a in resp.json()["value"]:
+            print(a["LogicalName"])
+
+
+# ── CLI Entry Point ────────────────────────────────────────────────────────
+def main():
+    global CONFIG
+    args = sys.argv[1:]
+
+    # Extract -c <name> from anywhere in args
+    conn_name = None
+    if "-c" in args:
+        idx = args.index("-c")
+        if idx + 1 < len(args):
+            conn_name = args[idx + 1]
+            args = args[:idx] + args[idx + 2:]
+        else:
+            print("Error: -c requires a connection name", file=sys.stderr)
+            sys.exit(1)
+
+    CONFIG = load_config(conn_name)
+
+    if not args or args == ["-i"]:
+        run_interactive()
+        return
+
+    if args[0] == "--help" or args[0] == "-h":
+        print(HELP_TEXT)
+        return
+
+    # Vim-dadbod mode: --vim -f <file>
+    if args[0] == "--vim":
+        if len(args) >= 3 and args[1] == "-f":
+            run_vim_file(args[2])
+        elif len(args) >= 2 and args[1] == "--tables":
+            list_tables_plain()
+        elif len(args) >= 3 and args[1] == "--columns":
+            list_columns_plain(args[2])
+        else:
+            print("Usage: dvquery --vim -f <file.sql>", file=sys.stderr)
+            sys.exit(1)
+        return
+
+    if args[0] == "--entities":
+        filt = args[1] if len(args) > 1 else None
+        list_entities(filt)
+        return
+
+    if args[0] == "--columns":
+        if len(args) < 2:
+            print("Usage: dvquery --columns <entity_name>")
+            sys.exit(1)
+        list_columns(args[1])
+        return
+
+    if args[0] == "-f":
+        if len(args) < 2:
+            print("Usage: dvquery -f <file.sql>")
+            sys.exit(1)
+        with open(args[1]) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("--"):
+                    continue
+                if re.match(r"SELECT\b", line, re.IGNORECASE):
+                    print(f"  >> {line[:80]}{'...' if len(line)>80 else ''}")
+                    parsed = parse_sql(line)
+                    if parsed:
+                        try:
+                            result = execute_query(parsed)
+                            print(format_results(result))
+                        except Exception as e:
+                            print(f"  Error: {e}")
+                    else:
+                        print("  (could not parse)")
+        return
+
+    # Single query from command line
+    query = " ".join(args)
+    parsed = parse_sql(query)
+    if not parsed:
+        print(f"Could not parse: {query}")
+        sys.exit(1)
+    try:
+        result = execute_query(parsed)
+        print(format_results(result))
+    except Exception as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except BrokenPipeError:
+        pass

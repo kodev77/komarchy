@@ -1,0 +1,9 @@
+[Desktop Entry]
+Version=1.0
+Name=Dynamics FSA - FS01
+Comment=Dynamics FSA - FS01 (RPC profile)
+Exec=google-chrome-stable --profile-directory="Profile 3" --new-window https://rpc-ue-dev-fs01.crm.dynamics.com/main.aspx?appid=5384463c-9bbe-453f-9a35-cd5a65137223&forceUCI=1&pagetype=entitylist&etn=msdyn_workorder&viewid=70518e86-6ec4-ed11-b596-0022482d11ed&viewType=1039
+Terminal=false
+Type=Application
+Icon=/home/ko/.local/share/applications/icons/Dynamics FSA - FS01.png
+StartupNotify=true

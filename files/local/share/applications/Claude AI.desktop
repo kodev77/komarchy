@@ -1,0 +1,9 @@
+[Desktop Entry]
+Version=1.0
+Name=Claude AI
+Comment=Claude AI (RPC profile)
+Exec=google-chrome-stable --profile-directory="Profile 3" --new-window https://claude.ai
+Terminal=false
+Type=Application
+Icon=/home/ko/.local/share/applications/icons/Claude AI.png
+StartupNotify=true

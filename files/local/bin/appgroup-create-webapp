@@ -1,0 +1,78 @@
+#!/bin/bash
+# Create a Chrome web app and add it to an app group.
+# Runs in a terminal so the user can switch to their browser to copy URLs.
+
+APP_GROUPS_DIR="$HOME/.config/omarchy/app-groups"
+CHROME_PROFILES_FILE="$APP_GROUPS_DIR/chrome-profiles.conf"
+
+group_name="$1"
+if [ -z "$group_name" ]; then
+  echo "Usage: appgroup-create-webapp <Work|Personal>"
+  exit 1
+fi
+
+group_file="$APP_GROUPS_DIR/${group_name,,}.txt"
+
+echo -e "\e[32mCreate a new Chrome web app for $group_name\n\e[0m"
+
+# Step 1: Pick Chrome profile
+profile_choice=$(gum choose --header "Chrome Profile" $(grep -v '^#' "$CHROME_PROFILES_FILE" | grep -v '^$' | cut -d'|' -f1))
+[ -z "$profile_choice" ] && exit 0
+profile_dir=$(grep "^${profile_choice}|" "$CHROME_PROFILES_FILE" | head -1 | cut -d'|' -f2)
+
+# Step 2: App name
+app_name=$(gum input --prompt "App name> " --placeholder "My Web App")
+[ -z "$app_name" ] && exit 0
+
+# Step 3: URL
+app_url=$(gum input --prompt "URL> " --placeholder "https://example.com")
+[ -z "$app_url" ] && exit 0
+
+# Step 4: Icon URL (optional)
+icon_url=$(gum input --prompt "Icon URL> " --placeholder "Paste favicon URL or leave blank for auto")
+
+# Set up icon
+icon_dir="$HOME/.local/share/applications/icons"
+mkdir -p "$icon_dir"
+icon_path="$icon_dir/$app_name.png"
+
+if [ -n "$icon_url" ]; then
+  echo "downloading icon..."
+  if ! curl -sL -o "$icon_path" --fail "$icon_url" || [ ! -s "$icon_path" ]; then
+    echo "failed to download icon, using chrome icon"
+    icon_path="google-chrome"
+  fi
+else
+  echo "auto-fetching icon..."
+  domain=$(echo "$app_url" | sed -E 's|^https?://([^/]+).*|\1|')
+  if ! curl -sL -o "$icon_path" --fail "https://$domain/apple-touch-icon.png" 2>/dev/null || [ ! -s "$icon_path" ]; then
+    if ! curl -sL -o "$icon_path" --fail "https://www.google.com/s2/favicons?domain=$domain&sz=128" 2>/dev/null || [ ! -s "$icon_path" ]; then
+      echo "could not auto-fetch icon, using chrome icon"
+      icon_path="google-chrome"
+    fi
+  fi
+fi
+
+# Create .desktop file
+desktop_file="$HOME/.local/share/applications/${app_name}.desktop"
+cat > "$desktop_file" <<EOF
+[Desktop Entry]
+Version=1.0
+Name=$app_name
+Comment=$app_name ($profile_choice profile)
+Exec=google-chrome-stable --profile-directory="$profile_dir" --new-window $app_url
+Terminal=false
+Type=Application
+Icon=$icon_path
+StartupNotify=true
+EOF
+chmod +x "$desktop_file"
+
+# Add to group
+echo "${app_name}|${app_name}.desktop" >> "$group_file"
+
+echo -e "\ncreated $app_name and added to $group_name"
+echo "done"
+echo ""
+read -r -p "press any key to close" -n 1
+exit 130

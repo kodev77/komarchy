@@ -1,0 +1,9 @@
+[Desktop Entry]
+Version=1.0
+Name=PowerBI Training - Matrix
+Comment=PowerBI Training - Matrix (RPC profile)
+Exec=google-chrome-stable --profile-directory="Profile 3" --new-window https://app.powerbi.com/groups/me/reports/617a7782-258f-4abe-bf34-dea9f8290d03/184749e18d39fbdb7617?experience=power-bi&bookmarkGuid=c821730e-b80b-4aac-882e-2992ffbcece6
+Terminal=false
+Type=Application
+Icon=/home/ko/.local/share/applications/icons/PowerBI Training - Matrix.png
+StartupNotify=true
