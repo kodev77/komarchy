@@ -159,14 +159,14 @@ for group in "${GROUP_ORDER[@]}"; do
   if is_group_done "$group"; then
     items+=("<$group_display> \033[0;32m(done)\033[0m")
   else
-    items+=("<$group_display>")
+    items+=("<$group_display> \033[0;34m(not migrated)\033[0m")
   fi
   while IFS= read -r name; do
     [[ -n "$name" ]] || continue
     if is_migrated "$name"; then
       items+=("  $name \033[0;32m(done)\033[0m")
     else
-      items+=("  $name")
+      items+=("  $name \033[0;34m(not migrated)\033[0m")
     fi
   done <<< "${GROUP_SCRIPTS[$group]}"
 done
@@ -181,6 +181,7 @@ selection=$(printf '%b\n' "${items[@]}" | fzf --ansi --prompt="migrate > " --hei
 # strip ansi codes and status suffix
 selection=$(echo "$selection" | sed 's/\x1b\[[0-9;]*m//g')
 selection="${selection% (done)}"
+selection="${selection% (not migrated)}"
 selection="${selection#<}"; selection="${selection%>}"
 # strip leading whitespace
 selection="${selection#"${selection%%[![:space:]]*}"}"
