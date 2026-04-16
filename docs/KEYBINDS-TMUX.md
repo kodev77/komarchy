@@ -38,6 +38,17 @@ The prefix is **Ctrl+Space** (with **Ctrl+b** as a fallback). Bindings marked wi
 | Prefix + `N` | Next session |
 | `Alt+Up/Down` | Previous/next session |
 
+## Session Save/Restore
+
+Powered by [tmux-resurrect](https://github.com/tmux-plugins/tmux-resurrect). One snapshot covers all live sessions, their windows, splits, and pane working directories. Running programs are **not** restored by default — only the shells.
+
+| Keybind | Action |
+|---|---|
+| Prefix + `Ctrl+s` | Save snapshot of all current sessions |
+| Prefix + `Ctrl+r` | Restore the last saved snapshot |
+
+Snapshots are written to `~/.local/share/tmux/resurrect/`. The `last` symlink there points at the file used by restore — repoint it to any timestamped file to roll back to an older snapshot. Removing a session (`Prefix + K` or `tmux kill-session -t <name>`) and re-saving removes it from the snapshot.
+
 ## Copy Mode
 
 Enter copy mode with **Prefix + `[`**. Exit with `q` or `Esc`.
