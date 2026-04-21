@@ -34,7 +34,7 @@ The launcher starts chromium in the background, waits for CDP, then runs the TUI
 
 - `q` / `Esc` in the TUI → `launcher.close_chromium()` runs, then the TUI exits.
 - TUI exit via any other path (sys.exit, SIGHUP when the terminal dies, SIGTERM) → `atexit` + signal handlers run `launcher.close_chromium()`.
-- Chromium closed by the user (CDP stops responding) → `_refresh_live` sees CDP go down and calls `App.exit()`.
+- Chromium closed by the user (CDP stops responding) → `_refresh_live` sees CDP go down and calls `App.exit()`. The CDP-up/down probe runs on every 3s tick regardless of mode — only the *tree rebuild* is suppressed in help/search (to avoid clobbering the help screen or an active filter), so closing chromium from any mode tears bm down within the refresh window.
 
 `close_chromium()` drives chromium's normal clean-exit path by closing every tab over CDP (the same path File → Quit uses). This flushes session cookies to disk — `pkill -TERM` alone does **not**, which was silently dropping auth for sites like `portal.azure.com`. `pkill` runs as a fallback only if CDP doesn't shut down within ~2s.
 
@@ -60,7 +60,7 @@ Single entry point with subcommands, following the existing `bm ko` / `bm rpc` p
 | `bm` | Ensure chromium (with CDP) is running, then run the TUI inline in the current terminal. Shrinks the terminal to the sidebar width if it started chromium. Exits when the TUI exits. |
 | `bm focus` | If a bm TUI is already running somewhere, focus its hyprland window; else spawn a dedicated ghostty with `bm.conf` and run `bm` inside. Meant for hyprland keybinds where there's no parent terminal. |
 | `bm open <url>` | Open-or-switch: if URL is already an open tab, activate it; otherwise open it in a new tab. Used by Hyprland keybinds and scripts. |
-| `bm save [--group <name>]` | Save the tab currently focused in chromium to `saved-tabs.json` (default group: `Unsorted`) |
+| `bm save [--group <name>]` | Save the tab currently focused in chromium to `saved-tabs.json` (default group: `Unsorted`). Distinct from the TUI's `s`, which saves the *highlighted* row — the CLI has no cursor, so it follows chromium's active tab. |
 | `bm list` | Print saved tabs as JSON (scripting hook) |
 | `bm rm <url>` | Remove a saved tab by URL |
 | `bm next` | Cycle forward through **saved tabs** and activate the matching chromium tab, preserving current window focus. Silent no-op if chromium isn't running or fewer than two saved tabs. Bound to Hyprland's Super+Alt+J. |
@@ -108,7 +108,7 @@ Two stacked Textual `Tree` widgets inside a single `Vertical`:
 - **`#tree`** — main list (`height: 1fr`). Top-level nodes are `▾ Open Tabs (N)` followed by one `▾ Saved: <group> (N)` node per group. Groups are collapsible. This is the only focusable widget.
 - **`#search-tree`** — single-row leaf at the bottom (`height: 1`). Multiplexed across three primary uses with priority: **active search > ephemeral status > committed filter > empty**, plus a **preview-mode suffix** that rides alongside whichever primary is showing, **except** during active search (would fight the blinking prompt) and during an ephemeral status message (the tag would push the message around; `_blink_cursor` re-renders when the status times out and the suffix comes back).
   - Active search: `/foo█` (blinking cursor while typing)
-  - Ephemeral status: transient notification like `Saved GitHub` or `Failed to activate (…)`, rendered at **0.65 foreground opacity** (readable but clearly non-focal, via `_faded_fg(0.65)`) and auto-cleared after `STATUS_DURATION` (3s)
+  - Ephemeral status: transient notification like `Saved Tab`, `Removed Tab`, `Already saved`, or `Failed to activate (…)`, rendered at **0.65 foreground opacity** (readable but clearly non-focal, via `_faded_fg(0.65)`) and auto-cleared after `STATUS_DURATION` (3s). Kept deliberately short — no title embedded in the message, since the cursor already shows which row was acted on.
   - Committed filter: `/foo` (no cursor) once the user hits enter on a search
   - Preview suffix: `[preview]` rendered at **0.35 foreground opacity** via `_faded_fg(0.35)` — noticeably dimmer than the 0.65 status tier, because it's a persistent mode marker that should sit quietly at the edge rather than compete with transient messages on the left. **Right-aligned** at the opposite end of the row; primary content stays left-aligned with the one-cell braille-blank inset, and braille-blank padding between them is computed from `search_tree.size.width` to push the suffix to the edge. `on_resize` re-renders so the alignment tracks terminal-width changes. On the one call that flips `display:False→True` the widget hasn't been laid out yet (`size.width == 0`); that case falls back to a minimum gap and schedules `call_after_refresh(self._update_search_tree)` so the suffix snaps to the right edge on the next paint instead of visibly sliding over from the left.
   - Hidden entirely when none of the above applies — the main tree fills the viewport
@@ -144,13 +144,14 @@ All tab-navigation logic lives inside `bm` — the global keybind just gets you 
 | `g` / `G` (or `Home` / `End`) | Jump to top / bottom |
 | `Ctrl+d` / `Ctrl+u` (or `PgDn` / `PgUp`) | Half page down / up |
 | `⏎` | Activate selected tab (also raises chromium, returns focus to browser) |
-| `o` | Open selected saved tab in a new chromium tab |
-| `s` | Save the tab currently focused in chromium |
+| `o` | Open-or-switch the selected row (works on live and saved rows — saved rows find-or-create a chromium tab at that URL) |
+| `s` | Save the selected row to `saved-tabs.json` (no-op status "Already saved" if the cursor is already on a saved row) |
 | `d` | Delete selected saved tab |
 | `r` | Rename selected saved tab |
 | `/` | Filter search (narrows both sections; text appears in the bottom `#search-tree` leaf) |
 | `n` / `N` | Next / previous search match |
-| `p` | Toggle auto-preview — every cursor move activates the tab under the cursor in chromium without raising its window |
+| `p` | Peek — activate the selected tab in chromium without raising the chromium window (one-shot; keyboard focus stays in bm) |
+| `P` | Toggle auto-preview mode — every cursor move auto-peeks. `[preview]` shows in the status line while on |
 | `?` | Toggle help — renders a "Keybindings" reference inline in the main tree (see below) |
 | `q` or `Esc` | Close: first press in search clears it; otherwise closes chromium and exits the TUI |
 
@@ -170,16 +171,18 @@ Motion keys (`j/k`, arrows, `g/G`, `Ctrl+d/u`, `h/l`) keep working while help is
 
 **Cursor floor in help mode.** Opening help parks the cursor on the blank spacer row (tree index 1), not the title. `action_cursor_up`, `action_half_page_up`, and `action_jump_top` clamp to that same floor so `k` / `Ctrl+U` / `g` can never land on row 0 (the `Keybindings` title). Row 1 is a braille-blank leaf, so the accent cursor is invisible there — help opens looking "unselected" and the title stays decorative.
 
-## Auto-preview mode
+## Peek (`p`) and auto-preview mode (`P`)
 
-`p` toggles auto-preview. While on, every cursor motion activates the tab under the cursor in chromium while keeping keyboard focus on the bm terminal, so you can scroll with `j/k` and watch chromium redraw beside you. A faded `[preview]` tag appears in the `#search-tree` status row and persists alongside a committed filter.
+Two keys, one underlying primitive. `p` fires a **one-shot peek**: activate the selected tab in chromium while keeping keyboard focus on the bm terminal. `P` toggles **auto-preview mode**, where every cursor motion auto-peeks — you can scroll with `j/k` and watch chromium redraw beside you. A faded `[preview]` tag appears in the `#search-tree` status row while mode is on, and persists alongside a committed filter.
+
+Both paths funnel through one helper — `_peek_row(row)` — so peek and auto-preview share the activate-and-restore-focus dance below.
 
 **Two row kinds, two behaviors.**
 
 - **Live tab** → `cdp.activate(tab_id)`. Flips chromium's active tab.
-- **Saved tab** → `actions.open_or_switch(url, raise_window=False)`. Finds an existing tab at that URL and activates it, or opens a new one. The `raise_window` kwarg on `open_or_switch` skips `raise_chromium()` for this path. Previewing many different saved URLs will accumulate tabs in chromium — that's the cost of the feature, not a bug; previewing the same URL repeatedly reuses the tab via `cdp.find_by_url`.
+- **Saved tab** → `actions.open_or_switch(url, raise_window=False)`. Finds an existing tab at that URL and activates it, or opens a new one. The `raise_window` kwarg on `open_or_switch` skips `raise_chromium()` for this path. Peeking many different saved URLs will accumulate tabs in chromium — that's the cost of the feature, not a bug; peeking the same URL repeatedly reuses the tab via `cdp.find_by_url`.
 
-**Focus-theft workaround.** CDP's `/json/activate` (and `Page.bringToFront`) internally call chromium's `BringToFront`, which raises the chromium window on hyprland — there is no CDP flag to suppress it, so skipping our own `raise_chromium()` isn't enough on its own. `_do_preview` therefore:
+**Focus-theft workaround.** CDP's `/json/activate` (and `Page.bringToFront`) internally call chromium's `BringToFront`, which raises the chromium window on hyprland — there is no CDP flag to suppress it, so skipping our own `raise_chromium()` isn't enough on its own. `_peek_row` therefore:
 
 1. captures the currently-focused window via `hyprctl activewindow -j` (that's bm, since the user just pressed a key in it),
 2. calls the CDP activate,
@@ -188,9 +191,9 @@ Motion keys (`j/k`, arrows, `g/G`, `Ctrl+d/u`, `h/l`) keep working while help is
 
 The `_active_window_address` / `_focus_window` helpers in `bm/tui.py` are tiny hyprctl wrappers; they no-op cleanly if `hyprctl` isn't on PATH (non-hyprland use).
 
-**Debouncing.** Cursor moves schedule `_do_preview` on a 100ms timer (`_preview_debounce`). Mashing `j` coalesces into a single CDP call per pause instead of flickering chromium through every intermediate tab. Each new motion cancels the pending timer and starts a fresh one, so the preview always reflects where the cursor actually stopped.
+**Debouncing (auto-preview only).** Cursor moves schedule `_do_preview` on a 100ms timer (`_preview_debounce`). Mashing `j` coalesces into a single CDP call per pause instead of flickering chromium through every intermediate tab. Each new motion cancels the pending timer and starts a fresh one, so the preview always reflects where the cursor actually stopped. One-shot `p` bypasses this — it peeks immediately.
 
-**Motion hook.** Preview is driven by Textual's `Tree.NodeHighlighted` event (via `on_tree_node_highlighted`), not by patching each motion action. One handler covers `j/k`, arrows, `g/G`, `Ctrl+d/u`, shift variants, and any future motion binding — whatever moves the cursor fires the event.
+**Motion hook.** Auto-preview is driven by Textual's `Tree.NodeHighlighted` event (via `on_tree_node_highlighted`), not by patching each motion action. One handler covers `j/k`, arrows, `g/G`, `Ctrl+d/u`, shift variants, and any future motion binding — whatever moves the cursor fires the event.
 
 **Suspended in help mode.** When help is visible the rows are text, not tabs (`_selected_row()` returns `None`), and `_do_preview` short-circuits. The preview-mode flag is preserved across help, so closing help resumes previewing.
 
@@ -263,7 +266,13 @@ Vim-key leader block. `Super+Alt` is chosen because `H/J/K/L` are unbound there 
 - If the saved tab we last landed on is **removed**, the URL won't match anything on the next press — we treat that as a fresh start and seed *just before the edge* so the next step lands cleanly on `saved[0]` (for J) or `saved[-1]` (for K).
 - Manual tab switches in chromium (click, Ctrl+Tab) aren't observed — the URL cursor stays "where bm last put it." The user can always `Super+Alt+H` into bm and pick a tab explicitly to resync.
 
-**TUI cursor follows the keybind.** When the TUI is visible and the user presses `Super+Alt+J/K` globally, the cursor snaps to the saved leaf that was just activated in chromium. Implemented in `_sync_cycle_cursor`, which piggybacks on the existing `_blink_cursor` 500 ms interval: on each tick it reads `state.json`, compares the current `tab_cycle_url` against the last one it snapped to (`_last_synced_cycle_url`), and — if it has changed — walks `self._saved_nodes.values()` to find the matching leaf and calls `Tree.select_node(leaf)`. The comparison is *value-based* so local j/k navigation (which doesn't touch `state.json`) is never overridden. Tree rebuilds reset `_last_synced_cycle_url` so the cursor re-applies after each 3 s live-tab refresh.
+**TUI cursor follows the keybind.** When the TUI is visible and the user presses `Super+Alt+J/K` globally, the cursor snaps to the saved leaf that was just activated in chromium. Implemented in `_sync_cycle_cursor`, which piggybacks on the existing `_blink_cursor` 500 ms interval: on each tick it reads `state.json`, compares the current `tab_cycle_url` against the last one it snapped to (`_last_synced_cycle_url`), and — if it has changed — schedules the actual `move_cursor` via `call_after_refresh` (in `_select_saved_url`). The comparison is *value-based* so local j/k navigation (which doesn't touch `state.json`) is never overridden. Same `call_after_refresh` reason as the cursor-restore path: if sync fires right after a tree rebuild (blink cadence and rebuild cadence can line up), the leaves still have `line == -1` and a direct cursor move would silently snap to line 0 — which would then *stick*, since `_last_synced_cycle_url` is already updated and the next blink wouldn't retry. All programmatic cursor motion uses `move_cursor` rather than `select_node` because `select_node` posts a `Tree.NodeSelected` message — see "Enter routing" below.
+
+**Stable Open Tabs order.** Chromium's `/json/list` returns tabs in MRU order on most builds, so every `cdp.activate` (from preview mode, Super+Alt+J/K cycling, or Enter) would reshuffle "Open Tabs" — the tab you just jumped to would pop to the top of the list, dragging its neighbors around. `_stable_sort_live` fixes this by maintaining a `self._live_order: list[str]` of tab ids in first-seen order: on each refresh it drops ids that no longer exist, appends newly-seen ids to the end, then returns the `cdp.Tab`s in that order. Only *position* is stabilized — titles and URLs still update live when the user navigates within a tab, since those are looked up per-id from the fresh `cdp.list_tabs()` response.
+
+**Cursor survives rebuilds.** `_refresh_live` rebuilds the tree every 3 s, and `tree.clear()` resets the cursor to line 0 — without preservation, both local j/k navigation and the external-cycle cursor would be thrown away on every refresh. `_rebuild_tree` therefore captures the cursor's current row `url`/`kind` before clearing, then schedules `_restore_cursor` via `call_after_refresh` to re-move the cursor onto the matching leaf (live tabs checked via `_live_node`, saved tabs via `_saved_nodes`). The `call_after_refresh` indirection is required: right after `tree.clear()` + `add_leaf`, Textual hasn't laid out the new TreeNodes yet — each leaf's `line` attribute is still -1, so moving the cursor silently snaps it back to line 0. Deferring to the next refresh tick means layout has computed line numbers and the move actually lands on the right row. If the URL no longer resolves (tab closed, saved tab removed, filter excluded it), the cursor stays at 0 as a fallback. `_last_synced_cycle_url` is deliberately *not* cleared on rebuild — clearing it would force `_sync_cycle_cursor` to override the just-restored cursor on the next blink.
+
+**Enter routing — why `move_cursor` over `select_node`.** Textual's `Tree` widget owns the `enter` key via its own built-in `Binding("enter", "select_cursor")`; because the tree is the focused widget, that binding wins and an App-level `Binding("enter", ...)` would never fire. `BmApp` therefore listens for `Tree.NodeSelected` at the App level (`on_tree_node_selected`) and translates it into `action_activate` for leaves whose `.data` is a `Row`. Group-header branches have `data=None` and fall through silently — Tree's own auto-expand hook handles their expand/collapse. The knock-on consequence: `Tree.select_node(leaf)` *also* posts `NodeSelected`, which our handler would now spuriously interpret as an Enter press. Every programmatic cursor move — `_restore_cursor`, `_select_saved_url`, and `action_collapse`'s "move to parent" fallback — therefore uses `move_cursor` (motion only, no message) instead. Helps behavior stay correct across: the 3 s live-refresh rebuild (would re-activate the cursor tab on every tick), the `Super+Alt+J/K` external-cycle sync (would double-activate), and pressing `h` on a leaf (would collapse/expand its parent group as a side effect).
 
 **Windowrule** (`~/.config/hypr/looknfeel.conf`, same marker-comment pattern):
 

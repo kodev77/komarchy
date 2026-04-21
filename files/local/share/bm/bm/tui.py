@@ -68,13 +68,17 @@ class BmApp(App):
         Binding("ctrl+u,pageup", "half_page_up", "½↑", show=False),
         Binding("h,left", "collapse", "collapse", show=False),
         Binding("l,right", "expand", "expand", show=False),
-        Binding("enter", "activate", "activate"),
+        # NOTE: Enter is intentionally NOT bound here — Textual's Tree widget
+        # has its own `enter → select_cursor` binding that wins because the
+        # tree is focused. We intercept the resulting Tree.NodeSelected
+        # message in on_tree_node_selected instead.
         Binding("o", "open_saved", "open"),
-        Binding("s", "save_focused", "save"),
+        Binding("s", "save_selected", "save"),
         Binding("d", "delete_saved", "delete"),
         Binding("r", "rename_saved", "rename"),
         Binding("slash", "focus_search", "/"),
-        Binding("p", "toggle_preview", "preview", show=False),
+        Binding("p", "peek", "peek", show=False),
+        Binding("P", "toggle_preview", "preview", show=False),
         Binding("question_mark", "show_help", "help", show=False),
         Binding("escape", "quit_to_browser", "browser"),
         Binding("q", "quit_to_browser", "quit"),
@@ -88,6 +92,13 @@ class BmApp(App):
         self._saved: list[store.SavedTab] = []
         self._live_node: Optional[TreeNode] = None
         self._saved_nodes: dict[str, TreeNode] = {}
+        # Stable first-seen order of chromium tab ids. Chromium's
+        # /json/list returns tabs in MRU order on most builds, which means
+        # every `cdp.activate` reshuffles the list — ugly if the user is
+        # watching "Open Tabs" while cycling. We track insertion order
+        # ourselves: keep ids that still exist, append new ones, drop
+        # closed ones. Rendered by _stable_sort_live.
+        self._live_order: list[str] = []
         # Raw omarchy colors, read once at startup. We read the dict directly
         # rather than going through self.current_theme because Textual's Theme
         # object sometimes normalizes or shades the hex we pass in, which
@@ -132,9 +143,16 @@ class BmApp(App):
         state.json's `tab_cycle_url`, but only when that URL has *changed*
         since we last observed it. Local j/k navigation doesn't touch
         state.json, so the user's in-TUI cursor movement is never
-        overridden — only external cycle-next/prev presses move the cursor.
-        Rebuilds clear `_last_synced_cycle_url` (in `_rebuild_tree`) so the
-        cursor re-applies after the tree is rebuilt."""
+        overridden — only external cycle-next/prev presses move the
+        cursor. The actual `move_cursor` call is deferred via
+        `call_after_refresh` so the tree is guaranteed to have been laid
+        out (leaf `.line` set); calling it on a freshly-added leaf whose
+        `.line` is still -1 silently snaps the cursor to 0 and leaves the
+        TUI permanently out of sync with chromium until the user cycles
+        to a different URL. We use `move_cursor` (not `select_node`)
+        because `select_node` posts a `Tree.NodeSelected` message, which
+        our on_tree_node_selected handler interprets as an Enter press
+        and would spuriously activate tabs on every external sync."""
         if self._in_help_mode or self._in_search_mode:
             return
         try:
@@ -145,13 +163,16 @@ class BmApp(App):
         if not url or url == self._last_synced_cycle_url:
             return
         self._last_synced_cycle_url = url
+        self.call_after_refresh(self._select_saved_url, url)
+
+    def _select_saved_url(self, url: str) -> None:
         for gnode in self._saved_nodes.values():
             for leaf in gnode.children:
                 row = leaf.data
                 if isinstance(row, Row) and row.kind == "saved" and row.url == url:
                     if not gnode.is_expanded:
                         gnode.expand()
-                    self.query_one("#tree", Tree).select_node(leaf)
+                    self.query_one("#tree", Tree).move_cursor(leaf)
                     return
 
     def _faded_fg(self, opacity: float = 0.65) -> str:
@@ -357,19 +378,26 @@ class BmApp(App):
     def _load_all(self) -> None:
         self._saved = store.load_saved()
         try:
-            self._live = cdp.list_tabs() if cdp.is_up() else []
+            live = cdp.list_tabs() if cdp.is_up() else []
         except Exception:
-            self._live = []
+            live = []
+        self._live = self._stable_sort_live(live)
         self._rebuild_tree()
 
     def _refresh_live(self) -> None:
-        if self._in_help_mode or self._in_search_mode:
-            return
+        # The chromium-up/down check must run regardless of mode: when
+        # chromium goes away we exit bm in lockstep, and a user sitting in
+        # the help screen or a search prompt still expects that coupling
+        # to fire. Only the *tree rebuild* is suppressed in help/search —
+        # help mode is rendering the keybindings into the tree itself, and
+        # search mode is showing a filtered view the user is actively
+        # editing; neither should be clobbered by a 3-second live refresh.
         try:
             if cdp.is_up():
                 self._chromium_seen_up = True
-                self._live = cdp.list_tabs()
-                self._rebuild_tree()
+                if not self._in_help_mode and not self._in_search_mode:
+                    self._live = self._stable_sort_live(cdp.list_tabs())
+                    self._rebuild_tree()
             elif self._chromium_seen_up:
                 # Chromium was running and has gone away — user closed it,
                 # so exit bm in lockstep (the reverse coupling is handled
@@ -378,8 +406,34 @@ class BmApp(App):
         except Exception:
             pass
 
+    def _stable_sort_live(self, tabs: list[cdp.Tab]) -> list[cdp.Tab]:
+        """Render live tabs in a stable first-seen order instead of CDP's
+        MRU order, so activating a tab doesn't reshuffle the Open Tabs
+        list. Drops ids that no longer exist, appends newly-seen ids.
+        Titles/URLs may still change (user navigating within a tab) —
+        only *position* is stabilized, keyed by the immutable tab id."""
+        current_ids = {t.id for t in tabs}
+        self._live_order = [tid for tid in self._live_order if tid in current_ids]
+        for t in tabs:
+            if t.id not in self._live_order:
+                self._live_order.append(t.id)
+        by_id = {t.id: t for t in tabs}
+        return [by_id[tid] for tid in self._live_order if tid in by_id]
+
     def _rebuild_tree(self) -> None:
         tree = self.query_one("#tree", Tree)
+        # Capture the cursor's current row URL (and kind) so we can restore
+        # the selection after tree.clear() wipes the cursor back to line 0.
+        # Without this, the 3-second live-tab refresh — or any other
+        # rebuild — would throw away local j/k navigation and snap the
+        # cursor up to the "Open Tabs" header.
+        prev_url = ""
+        prev_kind = ""
+        cur_node = tree.cursor_node
+        if cur_node is not None and isinstance(cur_node.data, Row):
+            prev_url = cur_node.data.url
+            prev_kind = cur_node.data.kind
+
         tree.clear()
         f = self.filter_text.strip().lower()
 
@@ -416,10 +470,43 @@ class BmApp(App):
                 )
                 gnode.add_leaf(_format_row(row), data=row)
 
+        # Restore cursor onto the same URL the user was on, if it still
+        # exists after the rebuild. _saved_nodes + _live_node give us a
+        # fast path; if the URL no longer matches any leaf (tab closed,
+        # saved tab removed, filter excludes it), we leave cursor at 0.
+        # Deferred via call_after_refresh: right after tree.clear() and the
+        # add_leaf calls above, Textual hasn't laid out the new nodes yet
+        # — each leaf's `line` attribute is still -1, so moving the cursor
+        # silently snaps it back to line 0. Running the restore on the next
+        # refresh tick means layout has computed line numbers and the cursor
+        # actually lands on the right row. We use `move_cursor` rather than
+        # `select_node` so the restore doesn't post a Tree.NodeSelected
+        # message that our on_tree_node_selected handler would treat as an
+        # Enter press and activate the tab on every live-refresh tick.
+        if prev_url:
+            self.call_after_refresh(
+                self._restore_cursor, tree, prev_url, prev_kind
+            )
+
         self._update_search_tree()
-        # Rebuild drops all TreeNode instances and resets cursor_line to 0,
-        # so force _sync_cycle_cursor to re-apply after the rebuild.
-        self._last_synced_cycle_url = ""
+        # NOTE: do NOT clear _last_synced_cycle_url here — doing so forces
+        # _sync_cycle_cursor to re-apply state.json's tab_cycle_url on the
+        # next blink and overrides the user's local navigation. The rebuild
+        # already restores cursor to prev_url above; sync only fires when
+        # tab_cycle_url *changes*, which is exactly what we want.
+
+    def _restore_cursor(self, tree: Tree, url: str, kind: str) -> None:
+        if kind == "live" and self._live_node is not None:
+            for leaf in self._live_node.children:
+                if isinstance(leaf.data, Row) and leaf.data.url == url:
+                    tree.move_cursor(leaf)
+                    return
+        # Fall through for saved kind, or as fallback if live lookup missed.
+        for gnode in self._saved_nodes.values():
+            for leaf in gnode.children:
+                if isinstance(leaf.data, Row) and leaf.data.url == url:
+                    tree.move_cursor(leaf)
+                    return
 
     # --- search ---------------------------------------------------------
 
@@ -520,7 +607,12 @@ class BmApp(App):
         if node.allow_expand and node.is_expanded:
             node.collapse()
         elif node.parent is not None:
-            tree.select_node(node.parent)
+            # move_cursor (not select_node) — select_node posts
+            # Tree.NodeSelected, which our handler interprets as an Enter
+            # press AND which Tree's own auto-expand hook reacts to by
+            # toggling the group. Both are wrong for "just move the cursor
+            # up to the parent group".
+            tree.move_cursor(node.parent)
 
     def action_expand(self) -> None:
         tree = self.query_one("#tree", Tree)
@@ -568,18 +660,27 @@ class BmApp(App):
             return
         self._refresh_live()
 
-    def action_save_focused(self) -> None:
+    def action_save_selected(self) -> None:
+        # Save the tab highlighted in the TUI — NOT chromium's active tab.
+        # The CLI's `bm save` still uses actions.save_focused() for the
+        # "save whatever chromium is showing right now" workflow (useful
+        # from a hyprland keybind without opening bm). In the TUI, the
+        # user has a cursor; respect it.
         if self._in_help_mode:
             return
+        row = self._selected_row()
+        if row is None:
+            self._set_status("No tab selected")
+            return
+        if row.kind == "saved":
+            self._set_status("Already saved")
+            return
         try:
-            saved = actions.save_focused()
+            store.add_saved(title=row.title or row.url, url=row.url)
         except Exception as exc:
             self._set_status(f"Failed to save ({exc})")
             return
-        if saved is None:
-            self._set_status("No focused tab")
-            return
-        self._set_status(f"Saved {saved.title}")
+        self._set_status("Saved Tab")
         self._load_all()
 
     def action_delete_saved(self) -> None:
@@ -589,7 +690,7 @@ class BmApp(App):
         if row is None or row.kind != "saved":
             return
         if store.remove_saved(row.url):
-            self._set_status(f"Removed {row.title}")
+            self._set_status("Removed Tab")
             self._load_all()
 
     def action_rename_saved(self) -> None:
@@ -621,10 +722,22 @@ class BmApp(App):
             return
         self._set_help(not self._help_visible())
 
-    # --- preview mode ---------------------------------------------------
-    # Toggle with `p`. When on, any cursor motion activates the tab under
-    # the cursor in chromium without raising the chromium window — so the
-    # user can peek through tabs from the sidebar without losing focus.
+    # --- peek + preview mode --------------------------------------------
+    # `p` fires a one-shot peek — activate the selected tab in chromium
+    # but keep focus in bm. `P` toggles a persistent preview mode where
+    # every cursor move auto-peeks; the [preview] indicator in the status
+    # line shows when it's on.
+    #
+    # Both paths go through _peek_row, which handles the focus-restore
+    # dance around chromium's unsuppressible BringToFront.
+
+    def action_peek(self) -> None:
+        if self._in_help_mode:
+            return
+        row = self._selected_row()
+        if row is None:
+            return
+        self._peek_row(row)
 
     def action_toggle_preview(self) -> None:
         if self._in_help_mode or self._in_search_mode:
@@ -638,6 +751,20 @@ class BmApp(App):
         elif self._preview_timer is not None:
             self._preview_timer.stop()
             self._preview_timer = None
+
+    def on_tree_node_selected(self, event) -> None:
+        # Textual's Tree widget owns the `enter` key — its built-in binding
+        # posts this NodeSelected message. An App-level Binding("enter", ...)
+        # would never fire because the focused Tree consumes the press first.
+        # So we translate NodeSelected → action_activate here for leaves.
+        # Branch nodes (group headers) have data=None; Tree's own auto-expand
+        # hook handles their expand/collapse, and we fall through silently.
+        if event.control is not self.query_one("#tree", Tree):
+            return
+        if self._in_help_mode or self._in_search_mode:
+            return
+        if isinstance(event.node.data, Row):
+            self.action_activate()
 
     def on_tree_node_highlighted(self, event) -> None:
         # Fires on every cursor-line change within any Tree. We only care
@@ -659,33 +786,36 @@ class BmApp(App):
         row = self._selected_row()
         if row is None:
             return
-        # chromium's CDP /json/activate calls BringToFront internally, which
-        # raises the chromium window and steals keyboard focus on hyprland —
-        # there is no CDP flag to suppress that. Workaround: capture the
-        # currently-focused window (bm, since the user just pressed a key
-        # here) and reassert focus right after the activate. A second
-        # delayed refocus catches chromium's async window-activation event,
-        # which can land after the sync hyprctl call returns.
+        self._peek_row(row)
+
+    def _peek_row(self, row: Row) -> None:
+        """Activate `row` in chromium (switch to its tab, or open it if it's
+        a saved tab that's not open yet) while keeping keyboard focus in
+        bm. Shared by the one-shot `p` peek and preview-mode's auto-peek.
+
+        chromium's CDP /json/activate calls BringToFront internally, which
+        raises the chromium window and steals focus on hyprland — there is
+        no CDP flag to suppress that. Workaround: capture the currently-
+        focused window (bm, since the user just pressed a key here) and
+        reassert focus right after the activate. A second delayed refocus
+        catches chromium's async window-activation event, which can land
+        after the sync hyprctl call returns.
+
+        Saved-tab peek uses actions.open_or_switch(raise_window=False) —
+        it finds-or-creates a tab. Peeking the same URL repeatedly reuses
+        one tab via cdp.find_by_url; peeking many different saved URLs
+        will accumulate tabs (cost of the feature, not a bug)."""
         prev_addr = _active_window_address()
         try:
             if row.kind == "live":
                 cdp.activate(row.tab_id)
             else:
-                # Saved tab: open_or_switch finds-or-creates a tab. The
-                # raise_window=False variant skips the explicit post-activate
-                # raise_chromium() — but chromium's own BringToFront still
-                # fires on activate, which is why we reassert bm focus below.
-                # Previewing the same URL repeatedly reuses one tab via
-                # cdp.find_by_url; previewing many different saved URLs will
-                # accumulate tabs (cost of the feature, not a bug).
                 actions.open_or_switch(row.url, raise_window=False)
         except Exception as exc:
-            self._set_status(f"Preview failed ({exc})")
+            self._set_status(f"Peek failed ({exc})")
             return
         if prev_addr:
             _focus_window(prev_addr)
-            # Chromium's window-activation event can arrive after our sync
-            # refocus lands. One delayed retry is enough in practice.
             self.set_timer(0.08, lambda addr=prev_addr: _focus_window(addr))
 
 
@@ -709,12 +839,13 @@ HELP_LINES = [
     ("g/G", "top / bottom"),
     ("^D/^U", "half page"),
     ("Enter", "activate tab"),
-    ("o", "open saved"),
-    ("s", "save focused"),
+    ("o", "open tab"),
+    ("s", "save tab"),
     ("d", "delete saved"),
-    ("r", "rename saved"),
+    ("r", "rename tab"),
     ("/", "search"),
-    ("p", "toggle preview"),
+    ("p", "preview tab"),
+    ("P", "preview mode"),
     ("?", "help"),
     ("q/Esc", "close"),
 ]
