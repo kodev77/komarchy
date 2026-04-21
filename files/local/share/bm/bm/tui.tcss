@@ -1,0 +1,68 @@
+/* Every widget renders transparent so ghostty's background-opacity actually
+   punches through to the desktop. Textual emits an explicit bg color for
+   any widget with a non-transparent background — those cells then ignore
+   the terminal's opacity. The universal `*` rule catches widgets we don't
+   know about, while the element list below is more specific than Textual's
+   built-in per-widget defaults (Static in particular defaults to $background
+   and would beat `*` on specificity). */
+* {
+    background: transparent;
+}
+
+App, Screen, Vertical, Container, Tree, Input {
+    background: transparent;
+}
+
+Input {
+    border: none;
+    padding: 0;
+    height: 1;
+    background: transparent;
+    background-tint: transparent;
+}
+
+Input:focus {
+    background: transparent;
+    background-tint: transparent;
+}
+
+Input > .input--cursor {
+    background: $accent;
+    color: $background;
+}
+
+Input > .input--selection {
+    background: transparent;
+}
+
+Input > .input--placeholder,
+Input > .input--suggestion {
+    background: transparent;
+}
+
+Tree {
+    scrollbar-size: 0 0;
+}
+
+#tree {
+    height: 1fr;
+}
+
+#search-tree {
+    height: 1;
+}
+
+/* Walker-style selection: recolor the cursor row's text to $accent instead
+   of painting a solid block behind it. Keeps the terminal's transparency
+   unbroken so the desktop still shows through the whole tree. */
+Tree > .tree--cursor {
+    background: transparent;
+    color: $accent;
+    text-style: not bold;
+}
+
+Tree > .tree--highlight {
+    background: transparent;
+    color: $accent;
+}
+

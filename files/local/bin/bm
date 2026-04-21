@@ -1,0 +1,258 @@
+#!/usr/bin/env bash
+# bm — bookmark manager entry point.
+#
+#   bm              Ensure chromium (with CDP) is running, then run the TUI
+#                   inline in the current terminal. Exits when the TUI exits.
+#   bm focus        Focus the bm window if running; else spawn one. Meant for
+#                   hyprland keybinds where there's no parent terminal.
+#   bm open <url>   Activate URL if already open, else open a new tab.
+#   bm save         Save the currently focused chromium tab.
+#   bm list         Print saved tabs as JSON.
+#   bm rm <url>     Remove a saved tab by URL.
+#   bm next         Cycle to next chromium tab (keeps current window focus).
+#   bm prev         Cycle to previous chromium tab (keeps current window focus).
+
+set -euo pipefail
+
+CDP_PORT="${BM_CDP_PORT:-9222}"
+PROFILE_DIR="$HOME/.config/bm/profile"
+GHOSTTY_CONFIG="$HOME/.config/ghostty/bm.conf"
+
+BM_BIN="${BM_BIN:-$HOME/.local/bin/bm-py}"
+
+run_bm_py() {
+  "$BM_BIN" "$@"
+}
+
+cdp_up() {
+  curl -sSf -o /dev/null --max-time 0.5 "http://localhost:${CDP_PORT}/json/version" 2>/dev/null
+}
+
+wait_for_cdp() {
+  local deadline=$(( SECONDS + 15 ))
+  while (( SECONDS < deadline )); do
+    if cdp_up; then
+      return 0
+    fi
+    sleep 0.3
+  done
+  return 1
+}
+
+clear_crash_marker() {
+  # Mark the prior shutdown as clean (keeps persistent cookies safe
+  # through SIGTERM) and set restore_on_startup=1 so session cookies
+  # survive. The restored tab set is wiped post-launch by clean_tabs().
+  local prefs="$PROFILE_DIR/Default/Preferences"
+  [[ -f "$prefs" ]] || return 0
+  command -v python3 >/dev/null 2>&1 || return 0
+  python3 - "$prefs" <<'PY'
+import json, sys
+p = sys.argv[1]
+try:
+    with open(p) as f:
+        d = json.load(f)
+except Exception:
+    sys.exit(0)
+d.setdefault("profile", {})["exit_type"] = "Normal"
+d["profile"]["exited_cleanly"] = True
+d.setdefault("session", {})["restore_on_startup"] = 1
+with open(p, "w") as f:
+    json.dump(d, f)
+PY
+}
+
+clean_tabs() {
+  # Open a fresh blank tab and close every restored tab. Chromium had
+  # to restore the session (for cookie reasons) but we don't want to
+  # show those tabs to the user.
+  command -v curl >/dev/null 2>&1 || return 0
+  local ids
+  ids="$(curl -sSf --max-time 1 "http://localhost:${CDP_PORT}/json/list" 2>/dev/null \
+    | python3 -c "import json,sys; print('\n'.join(t['id'] for t in json.load(sys.stdin) if t.get('type')=='page'))" 2>/dev/null)"
+  [[ -n "$ids" ]] || return 0
+  curl -sSfX PUT --max-time 1 "http://localhost:${CDP_PORT}/json/new?about:blank" >/dev/null 2>&1 || return 0
+  while IFS= read -r id; do
+    [[ -n "$id" ]] && curl -sSfX PUT --max-time 1 "http://localhost:${CDP_PORT}/json/close/${id}" >/dev/null 2>&1 || true
+  done <<< "$ids"
+}
+
+launch_chromium() {
+  mkdir -p "$PROFILE_DIR"
+  clear_crash_marker
+  setsid chromium \
+    --remote-debugging-port="$CDP_PORT" \
+    --user-data-dir="$PROFILE_DIR" \
+    --no-first-run \
+    --no-default-browser-check \
+    --restore-last-session \
+    --disable-session-crashed-bubble \
+    </dev/null >/dev/null 2>&1 &
+  disown
+}
+
+active_window_address() {
+  hyprctl activewindow -j 2>/dev/null | python3 -c \
+    'import json,sys; print(json.load(sys.stdin).get("address",""))' 2>/dev/null
+}
+
+shrink_to_sidebar() {
+  # Resize the given hyprland window to BM_SIDEBAR_WIDTH px wide, leaving
+  # the rest of the screen for chromium. No-op if no address or hyprland.
+  local addr="$1"
+  local width="${BM_SIDEBAR_WIDTH:-300}"
+  [[ -n "$addr" ]] || return 0
+  command -v hyprctl >/dev/null 2>&1 || return 0
+  # Focus the terminal (chromium likely has focus after opening), then resize.
+  hyprctl dispatch focuswindow address:"$addr" >/dev/null 2>&1 || true
+  hyprctl dispatch resizeactive exact "$width" 100% >/dev/null 2>&1 || true
+}
+
+cmd_interactive() {
+  if ! command -v chromium >/dev/null; then
+    echo "chromium not installed" >&2
+    exit 1
+  fi
+  if [[ ! -x "$BM_BIN" ]]; then
+    echo "bm-py not installed — run the 019-bm-tool migration" >&2
+    exit 1
+  fi
+
+  if ! cdp_up; then
+    local terminal_addr
+    terminal_addr="$(active_window_address)"
+    launch_chromium
+    if ! wait_for_cdp; then
+      echo "chromium did not expose CDP on :${CDP_PORT}" >&2
+      exit 1
+    fi
+    clean_tabs
+    # Chromium is tiled alongside; shrink the terminal so chromium claims most
+    # of the screen. Only runs when we launched chromium ourselves.
+    shrink_to_sidebar "$terminal_addr"
+  fi
+
+  # Advertise "bm" as the terminal title (OSC 2) so the window is also
+  # identifiable by title. Not required by `bm focus` (which uses process
+  # ancestry), but nice for taskbars, wmctrl, etc.
+  printf '\033]2;bm\007'
+
+  # Run the TUI inline in the current terminal. `exec` replaces the script
+  # so bash exits cleanly when the TUI does, dropping the user back at their
+  # shell without an extra process in the tree.
+  exec "$BM_BIN"
+}
+
+find_bm_ghostty_pid() {
+  # Walk up bm-py's process tree to find the ghostty ancestor. Matching by
+  # process ancestry is robust against terminal-title quirks (ghostty shows
+  # the command name when -e is used, Textual's OSC update doesn't always
+  # land, tmux hijacks the title, etc.).
+  local bm_pid pid comm parent
+  bm_pid="$(pgrep -x bm-py 2>/dev/null | head -1)"
+  [[ -n "$bm_pid" ]] || return 1
+  pid="$bm_pid"
+  while (( pid > 1 )); do
+    comm="$(ps -o comm= -p "$pid" 2>/dev/null | tr -d ' ')"
+    if [[ "$comm" == "ghostty" ]]; then
+      echo "$pid"
+      return 0
+    fi
+    parent="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')"
+    [[ -n "$parent" && "$parent" != "$pid" ]] || return 1
+    pid="$parent"
+  done
+  return 1
+}
+
+focus_hyprland_window_by_pid() {
+  local target_pid="$1"
+  command -v hyprctl >/dev/null 2>&1 || return 1
+  local addr
+  addr="$(hyprctl clients -j 2>/dev/null | python3 -c "
+import json, sys
+target = int(sys.argv[1])
+for c in json.load(sys.stdin):
+    if c.get('pid') == target:
+        print(c.get('address', ''))
+        break
+" "$target_pid")"
+  [[ -n "$addr" ]] || return 1
+  hyprctl dispatch focuswindow address:"$addr" >/dev/null 2>&1 || true
+  return 0
+}
+
+find_bm_window_address() {
+  command -v hyprctl >/dev/null 2>&1 || return 1
+  hyprctl clients -j 2>/dev/null | python3 -c "
+import json, sys
+for c in json.load(sys.stdin):
+    if c.get('class') == 'com.ko.bm':
+        print(c.get('address', ''))
+        break
+"
+}
+
+place_bm_as_sidebar() {
+  # After spawning, move bm to the left of the workspace and shrink it to
+  # sidebar width. Polls for the window to appear first since ghostty/GTK
+  # takes a moment to register with hyprland.
+  command -v hyprctl >/dev/null 2>&1 || return 0
+  local width="${BM_SIDEBAR_WIDTH:-300}"
+  local deadline=$(( SECONDS + 5 ))
+  local addr=""
+  while (( SECONDS < deadline )); do
+    addr="$(find_bm_window_address)"
+    [[ -n "$addr" ]] && break
+    sleep 0.1
+  done
+  [[ -n "$addr" ]] || return 0
+  hyprctl dispatch focuswindow address:"$addr" >/dev/null 2>&1 || true
+  # Dwindle places the new window wherever focus was; nudge it to the far
+  # left so it sits as a sidebar next to chromium. movewindow is a no-op
+  # if bm is already leftmost.
+  hyprctl dispatch movewindow l >/dev/null 2>&1 || true
+  hyprctl dispatch resizeactive exact "$width" 100% >/dev/null 2>&1 || true
+}
+
+cmd_focus() {
+  # Focus the existing bm window if one is running; otherwise spawn a new
+  # ghostty (with bm config) and run bm inside it. Intended for hyprland
+  # keybinds where there's no parent terminal.
+  local ghostty_pid
+  if ghostty_pid="$(find_bm_ghostty_pid)"; then
+    if focus_hyprland_window_by_pid "$ghostty_pid"; then
+      return 0
+    fi
+  fi
+  if ! command -v ghostty >/dev/null; then
+    echo "ghostty not installed" >&2
+    exit 1
+  fi
+  setsid ghostty \
+    --config-file="$GHOSTTY_CONFIG" \
+    -e "$0" \
+    </dev/null >/dev/null 2>&1 &
+  disown
+  place_bm_as_sidebar
+}
+
+case "${1:-}" in
+  ""|tui)
+    cmd_interactive
+    ;;
+  focus)
+    cmd_focus
+    ;;
+  open|save|list|rm|next|prev)
+    run_bm_py "$@"
+    ;;
+  -h|--help|help)
+    sed -n '3,10p' "$0" | sed 's/^# \{0,1\}//'
+    ;;
+  *)
+    echo "unknown subcommand: $1" >&2
+    echo "run: bm --help" >&2
+    exit 1
+    ;;
+esac
