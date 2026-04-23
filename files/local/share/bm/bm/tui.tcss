@@ -42,6 +42,22 @@ Input > .input--suggestion {
 
 Tree {
     scrollbar-size: 0 0;
+    /* Clip overflowing label text rather than letting the ScrollView
+       expand its virtual width. Without this, a rename buffer longer
+       than the visible row width lets right-arrow keystrokes scroll
+       the whole tree horizontally — the sidebar contents shift right
+       and the left edge of every label clips, which reads as a
+       page-wide scroll instead of a per-row cursor move. */
+    overflow-x: hidden;
+}
+
+/* Hide the ├─ └─ │ guide lines. Indentation + the ▼/▶ toggles still
+   communicate grouping, but without the "tree view" vibe. */
+Tree > .tree--guides,
+Tree > .tree--guides-hover,
+Tree > .tree--guides-selected {
+    color: transparent;
+    background: transparent;
 }
 
 #tree {
@@ -52,17 +68,18 @@ Tree {
     height: 1;
 }
 
-/* Walker-style selection: recolor the cursor row's text to $accent instead
-   of painting a solid block behind it. Keeps the terminal's transparency
-   unbroken so the desktop still shows through the whole tree. */
+/* Walker-style selection: instead of recoloring the cursor row to $accent
+   (which clashes with rows that intentionally use a different palette, like
+   the cyan essentials), FolderTree.render_label applies `dim` on top of
+   each row's own color. CSS here keeps bg transparent and strips bold so
+   non-bold rows don't pop wider on hover (Workspace re-asserts its bold in
+   render_label). */
 Tree > .tree--cursor {
     background: transparent;
-    color: $accent;
     text-style: not bold;
 }
 
 Tree > .tree--highlight {
     background: transparent;
-    color: $accent;
 }
 

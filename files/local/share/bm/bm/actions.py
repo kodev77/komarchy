@@ -2,11 +2,14 @@
 
 from typing import Optional
 import json
+import os
 import shutil
+import signal
 import subprocess
 import time
 
 from . import cdp, launcher, store
+from .paths import PID_FILE
 
 
 def raise_chromium() -> None:
@@ -55,71 +58,34 @@ def focus_window(address: str) -> None:
         pass
 
 
-def cycle_saved_tab(direction: int) -> bool:
-    """Advance (+1) or retreat (-1) through the user's **saved tabs** and
-    activate the matching chromium tab, keeping focus where the user
-    currently is. Returns True if a tab was activated, False on silent
-    no-op (chromium not running / fewer than two saved tabs).
+def send_cycle_signal(direction: int) -> bool:
+    """Poke the running bm TUI with SIGUSR1 (+1 = next) or SIGUSR2
+    (-1 = prev) so it advances its cursor + activates the next row
+    in-process. Returns True when the signal was delivered, False on
+    silent no-op (bm TUI not running, PID file missing/stale, etc.).
 
-    This follows `saved-tabs.json` rather than chromium's live tab strip —
-    it's the "jump through my bookmarks without opening bm" workflow that
-    pairs with the TUI's preview mode. If the next saved URL is already
-    open in chromium, `open_or_switch` activates that tab; otherwise it
-    opens a fresh tab there. Either way, `raise_window=False` keeps focus
-    on the app the user was just in.
-
-    Position tracking uses the URL (not an index) as the "cursor" so
-    edits to saved-tabs.json — reorders, adds, removes — never invalidate
-    the cycle: if the URL we landed on last is still present, we resume
-    from there; if it was removed, we fall back to the edge of the list
-    so the next step lands on the first/last saved tab.
+    The TUI is the single source of truth for tree ordering and
+    activation — this function only dispatches the intent; it does
+    not read `saved-tabs.json` or query CDP directly. That keeps the
+    cycle in lockstep with whatever the user sees in bm without the
+    CLI having to reconstruct state.
     """
-    # Silent no-op when CDP isn't reachable — chromium + bm are paired,
-    # so "chromium not running" also means bm isn't, and there's nothing
-    # meaningful to cycle. We deliberately don't call launcher.ensure_up()
-    # here; auto-launching chromium for a tab-cycle keypress would be
-    # surprising and slow.
-    if not cdp.is_up():
-        return False
-    saved = store.load_saved()
-    if len(saved) < 2:
-        return False
-
-    state = store.load_state()
-    last_url = state.get("tab_cycle_url", "")
-
-    idx: Optional[int] = None
-    for i, t in enumerate(saved):
-        if t.url == last_url:
-            idx = i
-            break
-
-    if idx is None:
-        # First press, or the last-cycled URL was removed/edited.
-        # Seed *just before* the edge so the first step lands cleanly
-        # on saved[0] for next (+1) or saved[-1] for prev (-1).
-        new_idx = 0 if direction > 0 else len(saved) - 1
-    else:
-        new_idx = (idx + direction) % len(saved)
-
-    target_url = saved[new_idx].url
-
-    prev_addr = active_window_address()
+    sig = signal.SIGUSR1 if direction > 0 else signal.SIGUSR2
     try:
-        open_or_switch(target_url, raise_window=False)
-    except Exception:
+        pid = int(PID_FILE.read_text().strip())
+    except (FileNotFoundError, ValueError, OSError):
         return False
-    state["tab_cycle_url"] = target_url
-    store.save_state(state)
-
-    # Focus-restore dance (same as the TUI's preview mode). Sync call
-    # catches the common case; a short sleep + second call catches
-    # chromium's async BringToFront that sometimes lands after our
-    # hyprctl dispatch returns.
-    if prev_addr:
-        focus_window(prev_addr)
-        time.sleep(0.08)
-        focus_window(prev_addr)
+    try:
+        os.kill(pid, sig)
+    except (ProcessLookupError, PermissionError, OSError):
+        # Stale PID (TUI died without cleanup) or we lack perms to
+        # signal. Best-effort cleanup of the stale file so the next
+        # press doesn't keep retrying.
+        try:
+            PID_FILE.unlink()
+        except OSError:
+            pass
+        return False
     return True
 
 

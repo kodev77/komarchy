@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# bm-tool: rollback bm launcher + ghostty config + all user data/caches
+# bm-tool: rollback bm launcher + ghostty config + ephemeral caches.
+# Preserves chromium profile and saved-tabs.json across fast dev loops;
+# full clean-slate wipe happens in 020's rollback.
 set -euo pipefail
 
 DST_BIN="$HOME/.local/bin/bm"
@@ -22,21 +24,32 @@ else
   echo "  ghostty bm.conf: not present, skipping"
 fi
 
-# Saved-tabs and bm-scoped config dir (state.json, dedicated chromium profile).
-# Wiped to give a clean slate — this is a test-cycle rollback, not a
-# user-preservation rollback.
-if [[ -d "$DST_SAVED_DIR" ]]; then
-  rm -rf "$DST_SAVED_DIR"
-  echo "  saved-tabs dir: removed ($DST_SAVED_DIR)"
+# saved-tabs.json is the user's bookmark data — preserve across fast dev
+# cycles. Migration re-seeds only when absent, so leaving it is a no-op
+# on re-apply. Full removal happens in 020's rollback.
+if [[ -f "$DST_SAVED_DIR/saved-tabs.json" ]]; then
+  echo "  saved-tabs.json: preserved ($DST_SAVED_DIR/saved-tabs.json)"
 else
-  echo "  saved-tabs dir: not present, skipping"
+  echo "  saved-tabs.json: not present, skipping"
 fi
 
-if [[ -d "$BM_STATE_DIR" ]]; then
-  rm -rf "$BM_STATE_DIR"
-  echo "  bm state/profile dir: removed ($BM_STATE_DIR)"
+# Ephemeral bm UI state — safe to drop on every rollback. The TUI
+# rewrites these on next launch.
+for f in "$BM_STATE_DIR/bm.pid" "$BM_STATE_DIR/state.json"; do
+  if [[ -f "$f" ]]; then
+    rm -f "$f"
+    echo "  bm ephemeral state: removed ($f)"
+  fi
+done
+
+# Chromium profile (auth cookies, saved passwords, site permissions,
+# history) lives at $BM_STATE_DIR/profile — preserve across fast dev
+# cycles so rollback→migrate doesn't re-prompt notification blocks or
+# drop logged-in sessions. Full removal happens in 020's rollback.
+if [[ -d "$BM_STATE_DIR/profile" ]]; then
+  echo "  bm chromium profile: preserved ($BM_STATE_DIR/profile)"
 else
-  echo "  bm state/profile dir: not present, skipping"
+  echo "  bm chromium profile: not present, skipping"
 fi
 
 if [[ -d "$BM_CACHE_DIR" ]]; then

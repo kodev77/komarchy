@@ -62,24 +62,27 @@ def cmd_rm(url: str) -> None:
 
 @main.command("next")
 def cmd_next() -> None:
-    """Cycle forward through saved tabs, activating the matching chromium
-    tab while keeping current window focus.
+    """Cycle forward through every row bm's TUI would render (saved
+    tabs + unpaired open tabs), activating the matching chromium tab
+    while keeping current window focus.
 
-    Silent no-op if chromium isn't running or there are fewer than two
-    saved tabs. Bound to hyprland's Super+Alt+J — the "flip through my
-    bookmarks from anywhere" workflow that pairs with the TUI preview.
+    Silent no-op if chromium isn't running or there are fewer than
+    two cycle entries. Bound to hyprland's Super+Alt+J — the "flip
+    through my tabs from anywhere" workflow that mirrors bm's
+    internal j+Enter navigation.
     """
-    actions.cycle_saved_tab(+1)
+    actions.send_cycle_signal(+1)
 
 
 @main.command("prev")
 def cmd_prev() -> None:
-    """Cycle backward through saved tabs, activating the matching chromium
-    tab while keeping current window focus.
+    """Cycle backward through every row bm's TUI would render,
+    activating the matching chromium tab while keeping current window
+    focus.
 
     Paired with `bm next` — bound to hyprland's Super+Alt+K.
     """
-    actions.cycle_saved_tab(-1)
+    actions.send_cycle_signal(-1)
 
 
 if __name__ == "__main__":
