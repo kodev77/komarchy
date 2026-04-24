@@ -75,6 +75,22 @@ def rename_saved(url: str, new_title: str) -> bool:
     return False
 
 
+def rename_group(old: str, new: str) -> bool:
+    """Rewrite every member tab's group field from `old` to `new`.
+    Returns True iff at least one tab moved. Caller is responsible for
+    blocking renames of the special Essentials group — store.py treats
+    group names as opaque strings."""
+    tabs = load_saved()
+    moved = False
+    for t in tabs:
+        if t.group == old:
+            t.group = new
+            moved = True
+    if moved:
+        save_all(tabs)
+    return moved
+
+
 def load_state() -> dict:
     ensure_dirs()
     if not STATE_FILE.exists():
