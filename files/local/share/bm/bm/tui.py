@@ -5,6 +5,7 @@ import asyncio
 import os
 import signal
 import time
+from urllib.parse import urlsplit
 
 from rich.style import Style
 from rich.text import Text
@@ -84,6 +85,35 @@ class FolderTree(Tree):
     # and resume from where the user left off.
     cursor_active: reactive[bool] = reactive(True)
 
+    # Flash-dim on arrival at the active "you are here" row. The active
+    # row resists the regular hover-dim so the highlight reads as a
+    # constant beacon, which hides the "cursor just landed here" motion
+    # cue every other row provides by dimming. ACTIVE_DIM_FLASH_S is a
+    # brief confirmation flash: on arrival, dim immediately; after the
+    # timer fires, restore to full color11. Net effect: a quick fade-in-
+    # fade-out on the active row whenever the cursor lands on it,
+    # without permanently washing out the highlight. _dim_active_row is
+    # the flag render_label reads; _dim_active_timer holds the pending
+    # Timer that clears the flash; _dim_active_key ((row.url, row.tab_id)
+    # of the cursor node) lets _reevaluate short-circuit when the
+    # logical row under the cursor hasn't changed — so a _rebuild_tree
+    # cycle that re-seats the cursor on the same row via _restore_cursor
+    # doesn't re-trigger the flash. Keying on id(node) would miss this
+    # because rebuild creates fresh node instances for the same row.
+    ACTIVE_DIM_FLASH_S = 0.18
+    _dim_active_row: bool = False
+    _dim_active_timer = None
+    _dim_active_key = None
+    # Per-call observation of (_active_tab_id, cursor row's url) so
+    # _reevaluate can tell which side of the pairing just changed.
+    # The flash should only fire when the *cursor* moves onto the
+    # already-active row, not when the row the cursor's already on
+    # *becomes* active (Enter/o/peek/external cycle) — the user just
+    # triggered the activation and doesn't need a "you moved here"
+    # cue for motion they didn't perform.
+    _last_active_tab_id: str = ""
+    _last_cursor_url = None
+
     def watch_cursor_active(self, old: bool, new: bool) -> None:
         # Tree keeps a per-line render cache keyed on (y, is_hover,
         # is_cursor, size, ...) — it doesn't know about cursor_active,
@@ -94,6 +124,113 @@ class FolderTree(Tree):
         # etc. watchers; it clears the line cache and schedules a
         # full re-render.
         self._invalidate()
+        self._reevaluate_active_dim()
+
+    def watch_cursor_line(self, previous_line: int, line: int) -> None:
+        # Base Tree.watch_cursor_line does load-bearing work (updates
+        # `_cursor_node`, flips per-node `_selected`, refreshes the
+        # old/new cursor rows) — must super() first or cursor tracking
+        # breaks. After the base runs, cursor_node reflects the new
+        # line so _reevaluate can compare against the active row.
+        # `always_update=True` on the base reactive means this fires
+        # on every assignment, including the same-value reseat during
+        # _rebuild_tree's _restore_cursor path, which is exactly when
+        # we want to reconsider the dim state.
+        super().watch_cursor_line(previous_line, line)
+        self._reevaluate_active_dim()
+
+    def _reevaluate_active_dim(self) -> None:
+        """Trigger or clear the flash-dim on the active-tab row. Called
+        on cursor moves, Esc-park toggles, and implicitly after tree
+        rebuilds (via watch_cursor_line firing when _restore_cursor
+        re-seats cursor_line). Short-circuits when the logical row
+        under the cursor is unchanged — so a rebuild that re-seats the
+        cursor on the same row doesn't re-trigger the flash, and a
+        completed flash stays cleared while the cursor still sits on
+        that row."""
+        app = self.app
+        cur = self.cursor_node
+        active_tab_id = getattr(app, "_active_tab_id", "")
+        on_active = (
+            self.cursor_active
+            and cur is not None
+            and bool(active_tab_id)
+            and isinstance(cur.data, Row)
+            and cur.data.tab_id == active_tab_id
+        )
+        # Diff against the previous observation to attribute this
+        # transition to either a cursor move or an active-tab swap.
+        # Updated unconditionally (before the key-based short-circuit)
+        # so the "last" values always reflect the most recent call,
+        # not the most recent call that did real work.
+        cur_cursor_url = (
+            cur.data.url
+            if cur is not None and isinstance(cur.data, Row)
+            else None
+        )
+        cursor_moved = self._last_cursor_url != cur_cursor_url
+        active_changed = self._last_active_tab_id != active_tab_id
+        self._last_active_tab_id = active_tab_id
+        self._last_cursor_url = cur_cursor_url
+
+        key = (cur.data.url, cur.data.tab_id) if on_active else None
+        if key == self._dim_active_key:
+            return
+        # Key changed — either cursor just landed on the active row,
+        # or just left it. In either direction, cancel any pending
+        # flash and repaint if we were mid-dim.
+        if self._dim_active_timer is not None:
+            self._dim_active_timer.stop()
+            self._dim_active_timer = None
+        needs_repaint = self._dim_active_row
+        self._dim_active_row = False
+        self._dim_active_key = key
+        # Only flash on the "cursor moved onto an already-active row"
+        # transition. When the active tab changed this tick (Enter/o/
+        # peek/external cycle all set `_active_tab_id` → _rebuild_tree
+        # → _restore_cursor re-seats cursor_line → we land here with
+        # `active_changed=True`), the user drove the activation and
+        # doesn't need a "you're here" flash for motion they didn't
+        # perform. `not active_changed` filters that out; `cursor_moved`
+        # gates on the cursor genuinely having moved, so a watcher
+        # firing spuriously on the same row stays quiet. Preview mode
+        # suppresses the flash entirely: every cursor landing already
+        # triggers a peek + `_mark_active` which repaints the row with
+        # the color11 highlight — the color change itself is the
+        # motion cue, so adding a dim blip on oscillations that happen
+        # to land back on the lagging active row just reads as a
+        # glitch.
+        in_preview = getattr(app, "_in_preview_mode", False)
+        if on_active and cursor_moved and not active_changed and not in_preview:
+            self._dim_active_row = True
+            self._dim_active_timer = self.set_timer(
+                self.ACTIVE_DIM_FLASH_S, self._clear_active_dim
+            )
+            needs_repaint = True
+        if needs_repaint:
+            self._request_dim_repaint()
+
+    def _clear_active_dim(self) -> None:
+        # Flash timer expired — drop the dim and repaint so the row
+        # snaps back to full color11.
+        self._dim_active_timer = None
+        self._dim_active_row = False
+        self._request_dim_repaint()
+
+    def _request_dim_repaint(self) -> None:
+        # Can't call `_invalidate()` directly here: base Tree._build
+        # reassigns `cursor_line` to `cursor_node._line` after
+        # populating `_tree_lines_cached` (see Textual's _tree.py
+        # around line 1294). With `always_update=True` that fires
+        # watch_cursor_line → our _reevaluate → this repaint path,
+        # and `_invalidate` zeroes out `_tree_lines_cached` mid-build.
+        # The property assertion right after _build returns then
+        # trips on the cleared cache (AssertionError in _on_idle).
+        # Deferring via call_after_refresh pushes the invalidate out
+        # of the current synchronous call stack — _build completes
+        # cleanly, the deferred invalidate runs, and the next render
+        # cycle picks up the new _dim_active_row flag.
+        self.call_after_refresh(self._invalidate)
 
     def _hover_color(self, fg_hex):
         """Blend `fg_hex` toward the theme background by HOVER_DIM_FACTOR,
@@ -192,6 +329,7 @@ class FolderTree(Tree):
         # per-row color, so park mode shows the full, non-dimmed color.
         src = None
         bold = False
+        dim = False
         if isinstance(node.data, _WorkspaceMarker):
             src = colors.get("accent") or colors.get("color4") or "#cccccc"
             bold = True
@@ -218,12 +356,32 @@ class FolderTree(Tree):
                 # color.
                 src = colors.get("foreground") or "#cccccc"
         if src is not None:
-            # Exception: the active "you are here" tab keeps its full
-            # color11 even when the cursor is parked on it — dimming
-            # the one row that tells the user "this is the tab the
-            # browser is showing" would undercut the whole point of
-            # the highlight.
-            dim = is_cursor and not is_selected
+            # The active "you are here" tab normally keeps its full
+            # color11 under the cursor so the highlight reads as a
+            # constant beacon rather than a dim blend. But arriving
+            # on the active row gives no motion cue ("did my cursor
+            # actually land there?") because color11 doesn't change.
+            # `_dim_active_row` is a brief on-arrival flash flipped
+            # True by `_reevaluate_active_dim` and cleared by its
+            # ACTIVE_DIM_FLASH_S timer — a quick fade-in-fade-out that
+            # confirms the landing without permanently washing out
+            # the highlight. Preview mode suppresses dim ONLY on Row
+            # (tab leaf) nodes: every cursor landing on a tab drives
+            # a peek + `_mark_active` that repaints the row to color11
+            # within ~100 ms, so the color transition is the motion
+            # cue and a hover-dim blip on the row that's about to
+            # light up just reads as visual noise. Workspace/group
+            # headers don't get peeked, so they keep the hover dim in
+            # preview mode — otherwise the cursor would look invisible
+            # on them and motion through the tree would feel like it
+            # skipped those rows.
+            in_preview = getattr(app, "_in_preview_mode", False)
+            suppress_dim = in_preview and isinstance(node.data, Row)
+            dim = (
+                is_cursor
+                and (not is_selected or self._dim_active_row)
+                and not suppress_dim
+            )
             color = self._hover_color(src) if dim else src
             label.stylize(Style(color=color, bold=bold))
         elif is_cursor:
@@ -237,13 +395,16 @@ class FolderTree(Tree):
             src = colors.get("foreground") or "#cccccc"
             label.stylize(Style(color=self._hover_color(src)))
 
-        # Group-header branches: prepend the folder glyph. Matches the
-        # label text's color treatment above so icon + header stay
-        # visually unified under hover dim.
+        # Group-header branches: prepend the folder glyph. Reuses the
+        # same `dim` boolean computed above so the icon's dim state
+        # stays in lockstep with the text — keying on raw `is_cursor`
+        # here would ignore the preview-mode suppression (for Row
+        # nodes) and the _dim_active_row flash logic, producing a
+        # half-dimmed row where only the icon fades.
         if isinstance(node.data, _GroupMarker):
             glyph = self._FOLDER_OPEN if node.is_expanded else self._FOLDER_CLOSED
             icon_src = colors.get("accent") or colors.get("color4") or "cyan"
-            icon_color = self._hover_color(icon_src) if is_cursor else icon_src
+            icon_color = self._hover_color(icon_src) if dim else icon_src
             icon_text = Text(f"{glyph}  ", style=Style(color=icon_color, bold=True))
             label = icon_text + label
         return label
@@ -344,6 +505,21 @@ def _glyph(url: str) -> str:
     # rendering (which needs a cached PNG) lands in phase 2 with a background
     # fetch worker — see docs/bm-tool-PLAN.md.
     return favicon.FALLBACK_GLYPH
+
+
+def _loose_url_key(url: str) -> str:
+    """Pair-fallback key: scheme + host + path, ignoring query and
+    fragment. Used by `_rebuild_tree`'s second pairing pass to match
+    saved↔live when the saved URL captured a volatile query param
+    (Google's `?zx=<nonce>`, jquery cache-busters, redirect-tracking
+    `gclid`/`fbclid`, etc.) and the live tab no longer carries the
+    same one. Falls back to the raw URL on any parse error so the
+    pairing pass stays resilient to malformed URLs in saved-tabs.json."""
+    try:
+        p = urlsplit(url)
+        return f"{p.scheme}://{p.netloc}{p.path}"
+    except Exception:
+        return url
 
 
 # Hyprland focus helpers now live in actions.py so both the TUI preview
@@ -967,6 +1143,14 @@ class BmApp(App):
         workspace_label.append("\u2800")
         workspace_label.append("Workspace", style=workspace_style)
         tree.root.add_leaf(workspace_label, data=_WorkspaceMarker())
+        # Breathing room between Workspace and whatever renders below \u2014
+        # essentials, the first group header, or a loose live leaf.
+        # Rendered unconditionally so the sidebar layout stays stable
+        # across tree states (empty \u2192 one group \u2192 essentials + groups).
+        # Previously the leading spacer lived inside the essentials
+        # block, so clean-slate and group-only states had the Workspace
+        # row butting directly against the next row.
+        tree.root.add_leaf(Text("\u2800"), data=_SpacerMarker())
 
         f = self.filter_text.strip().lower()
 
@@ -986,21 +1170,50 @@ class BmApp(App):
             if t.url in saved_urls and t.url not in paired_tab_id_by_url:
                 paired_tab_id_by_url[t.url] = t.id
                 consumed_tab_ids.add(t.id)
+        # Loose-key fallback for saved URLs that didn't pair exactly —
+        # handles the common case where the saved URL has volatile
+        # query params (e.g. Google's `?zx=<nonce>` cache-buster) but
+        # the live tab is the same logical page. Match by scheme + host
+        # + path only, ignoring query and fragment. Pair *only* when
+        # exactly one unconsumed live tab matches the loose key, so the
+        # heuristic never silently picks one of several similar tabs:
+        # if the user has three google.com tabs open, none get paired
+        # and the saved row stays unpaired (current behavior). Pairing
+        # writes the saved URL as the key (lookup later uses `s.url`),
+        # which differs from the live tab's URL — that's the whole
+        # point: the saved row gets a tab_id that exact-string matching
+        # would have missed.
+        live_by_loose_key: dict[str, list] = {}
+        for t in self._live:
+            if t.id in consumed_tab_ids:
+                continue
+            live_by_loose_key.setdefault(_loose_url_key(t.url), []).append(t)
+        for s_url in saved_urls:
+            if s_url in paired_tab_id_by_url:
+                continue
+            candidates = live_by_loose_key.get(_loose_url_key(s_url), [])
+            if len(candidates) == 1:
+                t = candidates[0]
+                paired_tab_id_by_url[s_url] = t.id
+                consumed_tab_ids.add(t.id)
+                # Drop the consumed candidate so a *second* saved URL
+                # with the same loose key can't claim the same live tab.
+                live_by_loose_key[_loose_url_key(s_url)] = []
 
         # Essentials section — top-level cyan leaves rendered above the
         # saved groups (no folder header). Data-driven from saved tabs
         # whose group is ESSENTIALS_GROUP. Pairing with live tabs reuses
         # the paired_tab_id_by_url map so highlight + activation paths
         # work identically to the saved-group rows. Cyan styling is
-        # applied in render_label, keyed on row.group. Surrounding
-        # spacers only render when essentials has rows so an empty
-        # section doesn't leave a stranded gap.
+        # applied in render_label, keyed on row.group. The leading
+        # spacer is the unconditional Workspace-below one added right
+        # after the Workspace row, so essentials only contributes its
+        # trailing spacer (between essentials and groups).
         essentials = [
             t for t in self._saved
             if t.group == ESSENTIALS_GROUP and _match(t.title, t.url, f)
         ]
         if essentials:
-            tree.root.add_leaf(Text("\u2800"), data=_SpacerMarker())
             for s in essentials:
                 row = Row(
                     kind="saved",
@@ -1340,6 +1553,9 @@ class BmApp(App):
             return
         self._activate_cursor()
         tree = self.query_one("#tree", Tree)
+        if self._in_preview_mode and not self._in_help_mode:
+            self._preview_cursor_step(tree, +1)
+            return
         tree.action_cursor_down()
         self._skip_spacers(tree, +1)
 
@@ -1348,6 +1564,9 @@ class BmApp(App):
             return
         self._activate_cursor()
         tree = self.query_one("#tree", Tree)
+        if self._in_preview_mode and not self._in_help_mode:
+            self._preview_cursor_step(tree, -1)
+            return
         tree.action_cursor_up()
         self._clamp_help_cursor(tree)
         self._skip_spacers(tree, -1)
@@ -1359,6 +1578,7 @@ class BmApp(App):
         tree = self.query_one("#tree", Tree)
         tree.cursor_line = _HELP_FIRST_ROW if self._in_help_mode else 0
         self._skip_spacers(tree, +1)
+        self._skip_non_tabs_if_previewing(tree, +1)
 
     def action_jump_bottom(self) -> None:
         if self._in_modal_state():
@@ -1367,6 +1587,7 @@ class BmApp(App):
         tree = self.query_one("#tree", Tree)
         tree.cursor_line = max(0, tree.last_line)
         self._skip_spacers(tree, -1)
+        self._skip_non_tabs_if_previewing(tree, -1)
 
     def action_half_page_down(self) -> None:
         if self._in_modal_state():
@@ -1377,6 +1598,7 @@ class BmApp(App):
         for _ in range(step):
             tree.action_cursor_down()
         self._skip_spacers(tree, +1)
+        self._skip_non_tabs_if_previewing(tree, +1)
 
     def action_half_page_up(self) -> None:
         if self._in_modal_state():
@@ -1388,6 +1610,7 @@ class BmApp(App):
             tree.action_cursor_up()
         self._clamp_help_cursor(tree)
         self._skip_spacers(tree, -1)
+        self._skip_non_tabs_if_previewing(tree, -1)
 
     def _clamp_help_cursor(self, tree: Tree) -> None:
         # In help mode rows 0 and 1 are the title and its spacer — they
@@ -1425,6 +1648,58 @@ class BmApp(App):
                     return
                 seen_boundary = True
                 direction = -direction
+
+    def _skip_non_tabs_if_previewing(self, tree: Tree, direction: int) -> None:
+        """Preview mode cycles tabs — so motion keys should only land on
+        `Row` leaves. Skip past Workspace/group-header/spacer rows in
+        `direction` (+1 = down, -1 = up) until the cursor reaches a
+        tab. If motion can't advance (cursor_line unchanged after an
+        action step), stop rather than looping forever — e.g. when the
+        tree has no Row nodes at all, or when `g` in preview lands on
+        the first non-Row and there's nothing past it. Does NOT wrap:
+        jump (`g`/`G`) and half-page (`Ctrl+D`/`U`) are "move a chunk"
+        actions and teleporting to the other end mid-skip would be
+        surprising. Wrap behavior lives in `_preview_cursor_step`,
+        dedicated to single-step j/k/J/K. Skipped in help mode (help
+        has its own row types and cursor floor)."""
+        if not self._in_preview_mode or self._in_help_mode:
+            return
+        while True:
+            node = tree.cursor_node
+            if node is None or isinstance(node.data, Row):
+                return
+            prev_line = tree.cursor_line
+            if direction > 0:
+                tree.action_cursor_down()
+            else:
+                tree.action_cursor_up()
+            if tree.cursor_line == prev_line:
+                return
+
+    def _preview_cursor_step(self, tree: Tree, direction: int) -> None:
+        """Preview-mode single-step j/k/J/K: move to the next tab row
+        in `direction`, wrapping at the tree edges like the external
+        Super+Alt+J/K cycle does. Steps one cursor action at a time,
+        skipping Workspace / group-header / spacer rows. On an edge
+        hit (`cursor_line` unchanged after the action step), wrap to
+        the opposite end and continue the search from there. The loop
+        is bounded by `last_line + 2` so an empty-tabs tree can't spin
+        forever — it returns with the cursor wherever the last step
+        left it."""
+        last_line = max(0, tree.last_line)
+        if last_line <= 0:
+            return
+        for _ in range(last_line + 2):
+            prev_line = tree.cursor_line
+            if direction > 0:
+                tree.action_cursor_down()
+            else:
+                tree.action_cursor_up()
+            if tree.cursor_line == prev_line:
+                tree.cursor_line = 0 if direction > 0 else last_line
+            node = tree.cursor_node
+            if node is not None and isinstance(node.data, Row):
+                return
 
     def action_collapse(self) -> None:
         # During inline rename the Left arrow moves the edit cursor; the
