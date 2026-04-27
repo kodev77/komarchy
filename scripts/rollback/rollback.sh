@@ -13,9 +13,9 @@ declare -A GROUP_NAMES=(
   [008]="neovim" [009]="neovim-cdexit" [010]="typescript" [011]="azure"
   [012]="dotnet" [013]="dadbod" [014]="sqlserver" [015]="mysql"
   [016]="dataverse" [017]="db2" [018]="updates" [019]="bm-tool"
-  [020]="bm-tool" [021]="updates"
+  [020]="bm-tool" [021]="updates" [022]="retro"
 )
-GROUP_ORDER=(000 001 002 003 004 005 006 007 008 009 010 011 012 013 014 015 016 017 018 019 020 021)
+GROUP_ORDER=(000 001 002 003 004 005 006 007 008 009 010 011 012 013 014 015 016 017 018 019 020 021 022)
 
 red()   { printf '\033[0;31m%s\033[0m\n' "$*"; }
 green() { printf '\033[0;32m%s\033[0m\n' "$*"; }
