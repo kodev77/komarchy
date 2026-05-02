@@ -12,6 +12,13 @@ STATE_FILE = HOME / ".config" / "bm" / "state.json"
 # external cycle walks the same tree the user sees without the CLI
 # having to reconstruct state.
 PID_FILE = HOME / ".config" / "bm" / "bm.pid"
+# PID of the chromium process that bm spawned. Written by
+# launcher._spawn after Popen, removed by close_chromium. Read by
+# actions.raise_chromium / `bm browser` to dispatch hyprland focus by
+# pid — chromium ignores --class on Wayland, so class-based matching
+# would non-deterministically focus any chromium window the user has
+# running. PID-based focus is exact.
+CHROMIUM_PID = HOME / ".config" / "bm" / "chromium.pid"
 FAVICON_CACHE = HOME / ".cache" / "bm" / "favicons"
 CHROMIUM_PROFILE = HOME / ".config" / "bm" / "profile"
 

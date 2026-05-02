@@ -9,18 +9,58 @@ import subprocess
 import time
 
 from . import cdp, launcher, store
-from .paths import PID_FILE
+from .paths import CHROMIUM_PID, PID_FILE
 
 
 def raise_chromium() -> None:
+    """Focus the bm-launched chromium window via PID lookup. Chromium
+    on Wayland ignores --class=, hardcoding its app_id to "chromium",
+    so class-based matching would non-deterministically focus any
+    chromium window the user has running. PID is exact: launcher._spawn
+    writes Popen().pid to CHROMIUM_PID at spawn, close_chromium unlinks
+    it on shutdown.
+
+    Stale PIDs (chromium died without bm cleanup) silently no-op and
+    drop the file so the next press doesn't keep retrying."""
+    pid = _read_chromium_pid()
+    if not pid:
+        return
+    if not _pid_alive(pid):
+        try:
+            CHROMIUM_PID.unlink()
+        except OSError:
+            pass
+        return
     try:
         subprocess.run(
-            ["hyprctl", "dispatch", "focuswindow", "class:chromium"],
+            ["hyprctl", "dispatch", "focuswindow", f"pid:{pid}"],
             check=False,
             capture_output=True,
         )
     except FileNotFoundError:
         pass
+
+
+def _read_chromium_pid() -> int:
+    try:
+        return int(CHROMIUM_PID.read_text().strip())
+    except (FileNotFoundError, ValueError, OSError):
+        return 0
+
+
+def _pid_alive(pid: int) -> bool:
+    """True iff `pid` refers to a live process. Sends signal 0 — POSIX
+    no-op that raises ProcessLookupError on a dead pid, PermissionError
+    on a foreign-owned-but-alive pid (we treat that as alive)."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
 
 
 def active_window_address() -> str:
@@ -71,6 +111,20 @@ def send_cycle_signal(direction: int) -> bool:
     CLI having to reconstruct state.
     """
     sig = signal.SIGUSR1 if direction > 0 else signal.SIGUSR2
+    return _signal_running_tui(sig)
+
+
+def send_workspace_cycle_signal() -> bool:
+    """Poke the running bm TUI with SIGRTMIN so it cycles to the next
+    workspace in-process. Same dispatch pattern as send_cycle_signal,
+    just a different signal so the TUI handler can route the action.
+    Bound to Super+Alt+; via the `bm workspace next` CLI subcommand.
+    Silent no-op when the TUI isn't running.
+    """
+    return _signal_running_tui(signal.SIGRTMIN)
+
+
+def _signal_running_tui(sig: int) -> bool:
     try:
         pid = int(PID_FILE.read_text().strip())
     except (FileNotFoundError, ValueError, OSError):
@@ -87,6 +141,37 @@ def send_cycle_signal(direction: int) -> bool:
             pass
         return False
     return True
+
+
+def copy_to_clipboard(text: str) -> bool:
+    """Pipe `text` to wl-copy. Returns True on success, False if wl-copy
+    is missing or exits non-zero. Wayland-only — bm runs under Hyprland,
+    so X11 fallbacks (xclip/xsel) aren't worth the branch.
+
+    stdout/stderr go to DEVNULL, not capture_output: wl-copy daemonizes
+    a child to hold the selection until another app claims it, and the
+    daemon inherits whatever stdout/stderr the parent passed. With
+    pipe-backed capture_output, that daemon keeps the pipe FDs open
+    indefinitely, communicate() never sees EOF, and subprocess.run
+    raises TimeoutExpired after 2s — manifesting as a "Copy failed"
+    status even though wl-copy worked. DEVNULL gives the daemon
+    closed-equivalent FDs, so subprocess.run returns immediately
+    once the parent forks the daemon and exits.
+    """
+    if not shutil.which("wl-copy"):
+        return False
+    try:
+        subprocess.run(
+            ["wl-copy"],
+            input=text.encode("utf-8"),
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=2,
+        )
+        return True
+    except (subprocess.SubprocessError, OSError):
+        return False
 
 
 def open_or_switch(url: str, *, raise_window: bool = True) -> str:
@@ -110,8 +195,14 @@ def open_or_switch(url: str, *, raise_window: bool = True) -> str:
     return tab.id
 
 
-def save_focused(group: str = "Unsorted") -> Optional[store.SavedTab]:
-    """Save the currently-active Chromium tab."""
+def save_focused(
+    group: str = "Unsorted",
+    workspace: Optional[str] = None,
+) -> Optional[store.SavedTab]:
+    """Save the currently-active Chromium tab. `workspace` is a
+    workspace id (uuid hex) — when None, store.add_saved falls back to
+    the first workspace in the array. Essentials are always global
+    regardless."""
     if not launcher.ensure_up():
         raise RuntimeError("chromium not reachable")
     tabs = cdp.list_tabs()
@@ -122,6 +213,7 @@ def save_focused(group: str = "Unsorted") -> Optional[store.SavedTab]:
         title=focused.title or focused.url,
         url=focused.url,
         group=group,
+        workspace=workspace,
     )
 
 

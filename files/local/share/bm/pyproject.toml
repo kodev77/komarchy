@@ -1,12 +1,13 @@
 [project]
 name = "bm"
-version = "0.1.69"
+version = "0.1.95"
 description = "Arc/Zen-style bookmark TUI for Chromium via CDP"
 requires-python = ">=3.11"
 dependencies = [
     "textual>=0.80",
     "httpx>=0.27",
     "click>=8.1",
+    "websockets>=13",
 ]
 
 [project.scripts]

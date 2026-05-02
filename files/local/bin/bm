@@ -5,10 +5,12 @@
 #                   inline in the current terminal. Exits when the TUI exits.
 #   bm focus        Focus the bm window if running; else spawn one. Meant for
 #                   hyprland keybinds where there's no parent terminal.
+#   bm browser      Focus the bm-launched chromium window (PID-based).
 #   bm open <url>   Activate URL if already open, else open a new tab.
 #   bm save         Save the currently focused chromium tab.
 #   bm list         Print saved tabs as JSON.
 #   bm rm <url>     Remove a saved tab by URL.
+#   bm workspace …  Manage workspaces (list/create/rm/switch).
 #   bm next         Cycle to next chromium tab (keeps current window focus).
 #   bm prev         Cycle to previous chromium tab (keeps current window focus).
 
@@ -91,9 +93,133 @@ launch_chromium() {
   disown
 }
 
+is_bm_running() {
+  # True iff the bm TUI's PID file points at a live process. Used by
+  # the keybind dispatch in `case` below so each binding either runs
+  # its action against the running bm, or spawns bm via cmd_focus
+  # when it isn't running yet.
+  local pid
+  pid="$(cat "$HOME/.config/bm/bm.pid" 2>/dev/null)" || return 1
+  [[ -n "$pid" ]] || return 1
+  kill -0 "$pid" 2>/dev/null
+}
+
+is_bm_focused() {
+  # True iff the bm sidebar (ghostty + bm-py) is the currently active
+  # hyprland window. Used by the `workspace next` keybind to gate the
+  # workspace cycle: pressing Super+Alt+; from another app focuses bm
+  # first; pressing it again with bm focused triggers the cycle. This
+  # avoids "I pressed it just to come over here, didn't mean to cycle."
+  command -v hyprctl >/dev/null 2>&1 || return 1
+  local cls
+  cls="$(hyprctl activewindow -j 2>/dev/null | python3 -c "
+import json, sys
+try:
+    print(json.load(sys.stdin).get('class', ''))
+except Exception:
+    pass
+" 2>/dev/null)"
+  [[ "$cls" == "com.ko.bm" ]]
+}
+
+is_chromium_focused() {
+  # True iff the bm-launched chromium is the currently active hyprland
+  # window. Same focus-then-cycle gate as is_bm_focused, but for the
+  # tab cycle (Super+Alt+J/K). Matches by PID against chromium.pid so
+  # any other chromium window the user has open doesn't satisfy the
+  # check.
+  command -v hyprctl >/dev/null 2>&1 || return 1
+  local cpid actpid
+  cpid="$(cat "$HOME/.config/bm/chromium.pid" 2>/dev/null)" || return 1
+  [[ -n "$cpid" ]] || return 1
+  actpid="$(hyprctl activewindow -j 2>/dev/null | python3 -c "
+import json, sys
+try:
+    print(json.load(sys.stdin).get('pid', ''))
+except Exception:
+    pass
+" 2>/dev/null)"
+  [[ -n "$actpid" && "$actpid" == "$cpid" ]]
+}
+
+focus_bm_chromium() {
+  # Dispatch hyprland focus to the bm-launched chromium by PID. Same
+  # logic as `bm browser` (Python entry) but inlined in bash so the
+  # next/prev cycle path doesn't pay for a second python startup. PID
+  # is exact — chromium ignores --class on Wayland, so class-based
+  # matching can't distinguish bm chromium from other chromium windows.
+  command -v hyprctl >/dev/null 2>&1 || return 0
+  local pid
+  pid="$(cat "$HOME/.config/bm/chromium.pid" 2>/dev/null)" || return 0
+  [[ -n "$pid" ]] || return 0
+  kill -0 "$pid" 2>/dev/null || return 0
+  hyprctl dispatch focuswindow "pid:$pid" >/dev/null 2>&1 || true
+}
+
+write_chromium_pid() {
+  # Persist the bm-spawned chromium's PID so `bm browser` can dispatch
+  # hyprland focus by pid:NNN — class-based matching is unreliable
+  # because chromium ignores --class on Wayland (hardcoded app_id).
+  #
+  # `setsid` forks before exec, so $! captures the setsid wrapper that
+  # exits immediately, not chromium. Instead, locate the main chromium
+  # process by argument: it has --user-data-dir set but does NOT have
+  # --type= (renderer / zygote / gpu / utility children all carry
+  # --type=, so excluding them isolates the main browser process).
+  #
+  # Idempotent: re-writes on every start, including the cdp-already-up
+  # path (bm started while a previous chromium is still running).
+  local cpid
+  cpid="$(pgrep -af -- "--user-data-dir=$PROFILE_DIR" 2>/dev/null | grep -v -- "--type=" | head -1 | awk '{print $1}')"
+  if [[ -n "$cpid" ]]; then
+    mkdir -p "$HOME/.config/bm"
+    echo "$cpid" > "$HOME/.config/bm/chromium.pid"
+  fi
+}
+
 active_window_address() {
   hyprctl activewindow -j 2>/dev/null | python3 -c \
     'import json,sys; print(json.load(sys.stdin).get("address",""))' 2>/dev/null
+}
+
+self_ghostty_address() {
+  # Find this script's containing ghostty terminal address by walking
+  # our process ancestry. PID-based — doesn't depend on the new
+  # window having received focus yet, which matters when ghostty was
+  # just spawned by `bm focus` and hyprland's activewindow may still
+  # report the previous focus (chromium, the launcher app, etc.).
+  command -v hyprctl >/dev/null 2>&1 || return 1
+  local pid="$$"
+  local comm parent
+  while (( pid > 1 )); do
+    comm="$(ps -o comm= -p "$pid" 2>/dev/null | tr -d ' ')"
+    if [[ "$comm" == "ghostty" ]]; then
+      # Poll briefly — a just-mapped window may not be in hyprctl's
+      # client list yet.
+      local i
+      for i in 1 2 3 4 5; do
+        local addr
+        addr="$(hyprctl clients -j 2>/dev/null | python3 -c "
+import json, sys
+target = int(sys.argv[1])
+for c in json.load(sys.stdin):
+    if c.get('pid') == target:
+        print(c.get('address',''))
+        break
+" "$pid" 2>/dev/null)"
+        if [[ -n "$addr" ]]; then
+          echo "$addr"
+          return 0
+        fi
+        sleep 0.05
+      done
+      return 1
+    fi
+    parent="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')"
+    [[ -n "$parent" && "$parent" != "$pid" && "$parent" != "0" ]] || return 1
+    pid="$parent"
+  done
+  return 1
 }
 
 shrink_to_sidebar() {
@@ -118,19 +244,37 @@ cmd_interactive() {
     exit 1
   fi
 
+  # Look up our terminal's hyprland address by walking process
+  # ancestry to the parent ghostty. PID-based — doesn't depend on
+  # focus state, which is unreliable here: when bm is spawned via
+  # `bm focus`, the just-created ghostty may not have stolen focus
+  # yet, so activewindow could report chromium or whatever the user
+  # was in. Resizing the wrong window's why bm sometimes opened in
+  # the default 50/50 tile instead of as a sidebar.
+  local terminal_addr
+  terminal_addr="$(self_ghostty_address)"
+
   if ! cdp_up; then
-    local terminal_addr
-    terminal_addr="$(active_window_address)"
     launch_chromium
     if ! wait_for_cdp; then
       echo "chromium did not expose CDP on :${CDP_PORT}" >&2
       exit 1
     fi
     clean_tabs
-    # Chromium is tiled alongside; shrink the terminal so chromium claims most
-    # of the screen. Only runs when we launched chromium ourselves.
-    shrink_to_sidebar "$terminal_addr"
   fi
+
+  # Always (re)write chromium.pid — covers both fresh-launch and
+  # bm-started-with-chromium-already-up. `bm browser` reads this file
+  # for Super+Alt+L; without it the binding is a silent no-op.
+  write_chromium_pid
+
+  # Always size bm as the sidebar so chromium gets the rest of the
+  # screen. Previously this was inside the `! cdp_up` block, so bm
+  # opened at default ghostty size when chromium was already running
+  # (session-restored, leftover from a crash, or manually launched).
+  # cdp_up == True implies chromium exists, so the shrink is always
+  # appropriate by the time we reach here.
+  shrink_to_sidebar "$terminal_addr"
 
   # Advertise "bm" as the terminal title (OSC 2) so the window is also
   # identifiable by title. Not required by `bm focus` (which uses process
@@ -242,13 +386,73 @@ case "${1:-}" in
     cmd_interactive
     ;;
   focus)
+    # Super+Alt+H: focus bm sidebar. cmd_focus handles spawn-if-not-
+    # running and calls hyprctl dispatch focuswindow address:NNN
+    # which auto-switches the user to bm's hyprland workspace.
     cmd_focus
     ;;
-  open|save|list|rm|next|prev)
+  browser)
+    # Super+Alt+L: focus the bm chromium window. PID-based dispatch
+    # (chromium ignores --class on Wayland). When bm isn't running
+    # yet, fall through to cmd_focus to spawn the whole stack — bm
+    # then chromium — so the keybind opens what isn't open instead
+    # of being a silent no-op.
+    if is_bm_running; then
+      run_bm_py "$@"
+    else
+      cmd_focus
+    fi
+    ;;
+  next|prev)
+    # Super+Alt+J/K. Two-press model:
+    #   1st press (neither bm nor chromium focused): focus chromium,
+    #     no cycle. User just wanted to land on chromium without their
+    #     cursor skipping past their current tab.
+    #   2nd press (already in the bm context — either bm sidebar OR
+    #     chromium has focus): signal the cycle. The user is already
+    #     looking at the right surface; no focus shuffle needed.
+    # Spawn fallback when bm isn't running.
+    if is_bm_running; then
+      if is_chromium_focused || is_bm_focused; then
+        run_bm_py "$@"
+      else
+        focus_bm_chromium
+      fi
+    else
+      cmd_focus
+    fi
+    ;;
+  workspace)
+    # `bm workspace next` (Super+Alt+;) — two-press model, same shape as
+    # next/prev: if the user is already in the bm context (bm sidebar OR
+    # the bm chromium has focus) cycle workspaces in place; otherwise
+    # the first press only focuses bm. Treating bm-chromium-focused as
+    # "in context" keeps the user from getting yanked off chromium just
+    # to cycle workspaces — they're already looking at the right stack.
+    # Other workspace subcommands (list / create / rm / switch) have
+    # no focus side effects.
+    case "${2:-}" in
+      next)
+        if is_bm_running; then
+          if is_bm_focused || is_chromium_focused; then
+            run_bm_py "$@"
+          else
+            cmd_focus
+          fi
+        else
+          cmd_focus
+        fi
+        ;;
+      *)
+        run_bm_py "$@"
+        ;;
+    esac
+    ;;
+  open|save|list|rm)
     run_bm_py "$@"
     ;;
   -h|--help|help)
-    sed -n '3,10p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '3,12p' "$0" | sed 's/^# \{0,1\}//'
     ;;
   *)
     echo "unknown subcommand: $1" >&2

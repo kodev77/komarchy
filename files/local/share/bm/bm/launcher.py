@@ -7,7 +7,7 @@ import subprocess
 import time
 
 from . import cdp
-from .paths import CHROMIUM_PROFILE, CDP_PORT
+from .paths import CHROMIUM_PID, CHROMIUM_PROFILE, CDP_PORT
 
 
 def close_chromium() -> None:
@@ -30,10 +30,12 @@ def close_chromium() -> None:
     deadline = time.monotonic() + 2.0
     while time.monotonic() < deadline:
         if not cdp.is_up():
+            _drop_chromium_pid()
             return
         time.sleep(0.1)
     # CDP never went away — fall back to pkill.
     if not shutil.which("pkill"):
+        _drop_chromium_pid()
         return
     try:
         subprocess.run(
@@ -42,6 +44,17 @@ def close_chromium() -> None:
             timeout=2,
         )
     except (subprocess.SubprocessError, OSError):
+        pass
+    _drop_chromium_pid()
+
+
+def _drop_chromium_pid() -> None:
+    """Remove the chromium PID file. Called after the chromium process
+    has exited (or we've issued a kill). Best-effort — silent when the
+    file is already gone."""
+    try:
+        CHROMIUM_PID.unlink()
+    except (FileNotFoundError, OSError):
         pass
 
 BM_CLASS = "com.ko.bm"
@@ -75,7 +88,7 @@ def ensure_up(timeout: float = 15.0) -> bool:
 def _spawn() -> None:
     CHROMIUM_PROFILE.mkdir(parents=True, exist_ok=True)
     _clear_crash_marker()
-    subprocess.Popen(
+    proc = subprocess.Popen(
         [
             "chromium",
             f"--remote-debugging-port={CDP_PORT}",
@@ -93,6 +106,17 @@ def _spawn() -> None:
         stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
+    # Persist chromium's PID so `bm browser` (and actions.raise_chromium)
+    # can dispatch hyprland focus by pid:NNN. This is the only reliable
+    # way to target the bm-managed chromium specifically: chromium on
+    # Wayland ignores --class=, hardcoding its app_id to "chromium",
+    # so `class:` matching would non-deterministically focus any
+    # chromium window the user has open. The PID is concrete.
+    try:
+        CHROMIUM_PID.parent.mkdir(parents=True, exist_ok=True)
+        CHROMIUM_PID.write_text(str(proc.pid))
+    except OSError:
+        pass
 
 
 def _clear_crash_marker() -> None:

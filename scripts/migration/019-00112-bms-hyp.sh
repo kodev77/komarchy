@@ -22,10 +22,11 @@ $BM_BIND_BEGIN
 # omarchy uses Super+J/K/L for window-split/keybinds/layout, which stay
 # intact). All four exec absolute paths because hyprland's PATH doesn't
 # include ~/.local/bin in default omarchy setups.
-bindd = SUPER ALT, H, bm sidebar,    exec, \$HOME/.local/bin/bm focus
-bindd = SUPER ALT, J, bm next tab,   exec, \$HOME/.local/bin/bm next
-bindd = SUPER ALT, K, bm prev tab,   exec, \$HOME/.local/bin/bm prev
-bindd = SUPER ALT, L, focus browser, exec, hyprctl dispatch focuswindow class:chromium
+bindd = SUPER ALT, H,         bm sidebar,        exec, \$HOME/.local/bin/bm focus
+bindd = SUPER ALT, J,         bm next tab,       exec, \$HOME/.local/bin/bm next
+bindd = SUPER ALT, K,         bm prev tab,       exec, \$HOME/.local/bin/bm prev
+bindd = SUPER ALT, L,         focus browser,     exec, \$HOME/.local/bin/bm browser
+bindd = SUPER ALT, semicolon, bm next workspace, exec, \$HOME/.local/bin/bm workspace next
 $BM_BIND_END
 EOF
     echo "  bindings.conf: Super+Alt+hjkl block added"
