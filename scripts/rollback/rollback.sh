@@ -13,9 +13,10 @@ declare -A GROUP_NAMES=(
   [008]="neovim" [009]="neovim-cdexit" [010]="typescript" [011]="azure"
   [012]="dotnet" [013]="dadbod" [014]="sqlserver" [015]="mysql"
   [016]="dataverse" [017]="db2" [018]="updates" [019]="bm-tool"
-  [020]="bm-tool" [021]="updates" [022]="retro"
+  [020]="bm-tool" [021]="updates" [022]="retro" [023]="bm-tool-om37"
+  [024]="retro-emu"
 )
-GROUP_ORDER=(000 001 002 003 004 005 006 007 008 009 010 011 012 013 014 015 016 017 018 019 020 021 022)
+GROUP_ORDER=(000 001 002 003 004 005 006 007 008 009 010 011 012 013 014 015 016 017 018 019 020 021 022 023 024)
 
 red()   { printf '\033[0;31m%s\033[0m\n' "$*"; }
 green() { printf '\033[0;32m%s\033[0m\n' "$*"; }
@@ -43,6 +44,10 @@ fi
 # --- state helpers ---
 is_migrated() {
   [[ -f "$STATE_DIR/$1" ]]
+}
+
+is_skipped() {
+  [[ -f "$STATE_DIR/$1" ]] && [[ "$(head -c 8 "$STATE_DIR/$1" 2>/dev/null)" == "SKIPPED " ]]
 }
 
 unmark_migrated() {
@@ -85,6 +90,14 @@ rollback_group() {
     fi
 
     any_rolled_back=true
+
+    # skipped scripts never applied changes — just clear the state marker
+    if is_skipped "$name"; then
+      echo "$name (was skipped, clearing marker)"
+      unmark_migrated "$name"
+      continue
+    fi
+
     echo "$name"
     echo ""
     if ! bash "$REPO_DIR/scripts/rollback/$name"; then
@@ -134,7 +147,9 @@ for group in "${reversed[@]}"; do
   done <<< "${GROUP_SCRIPTS[$group]}"
   for (( i=${#scripts[@]}-1; i>=0; i-- )); do
     name="${scripts[$i]}"
-    if is_migrated "$name"; then
+    if is_skipped "$name"; then
+      items+=("  $name \033[0;33m(skipped)\033[0m")
+    elif is_migrated "$name"; then
       items+=("  $name")
     else
       items+=("  $name \033[0;34m(not migrated)\033[0m")
@@ -147,6 +162,7 @@ selection=$(printf '%b\n' "${items[@]}" | fzf --ansi --prompt="rollback > " --he
 # strip ansi codes and status suffix
 selection=$(echo "$selection" | sed 's/\x1b\[[0-9;]*m//g')
 selection="${selection% (not migrated)}"
+selection="${selection% (skipped)}"
 selection="${selection#<}"; selection="${selection%>}"
 # strip leading whitespace
 selection="${selection#"${selection%%[![:space:]]*}"}"
@@ -184,6 +200,10 @@ elif [[ "$selection" == *.sh ]]; then
 
   if ! is_migrated "$selection"; then
     blue "skip $selection (not migrated)"
+  elif is_skipped "$selection"; then
+    echo "$selection (was skipped, clearing marker)"
+    unmark_migrated "$selection"
+    green "rollback complete"
   else
     echo "$selection"
     echo ""

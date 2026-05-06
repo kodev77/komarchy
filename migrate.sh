@@ -14,9 +14,10 @@ declare -A GROUP_NAMES=(
   [008]="neovim" [009]="neovim-cdexit" [010]="typescript" [011]="azure"
   [012]="dotnet" [013]="dadbod" [014]="sqlserver" [015]="mysql"
   [016]="dataverse" [017]="db2" [018]="updates" [019]="bm-tool"
-  [020]="bm-tool" [021]="updates" [022]="retro"
+  [020]="bm-tool" [021]="updates" [022]="retro" [023]="bm-tool-om37"
+  [024]="retro-emu"
 )
-GROUP_ORDER=(000 001 002 003 004 005 006 007 008 009 010 011 012 013 014 015 016 017 018 019 020 021 022)
+GROUP_ORDER=(000 001 002 003 004 005 006 007 008 009 010 011 012 013 014 015 016 017 018 019 020 021 022 023 024)
 
 red()   { printf '\033[0;31m%s\033[0m\n' "$*"; }
 green() { printf '\033[0;32m%s\033[0m\n' "$*"; }
@@ -80,6 +81,10 @@ is_migrated() {
   [[ -f "$STATE_DIR/$1" ]]
 }
 
+is_skipped() {
+  [[ -f "$STATE_DIR/$1" ]] && [[ "$(head -c 8 "$STATE_DIR/$1" 2>/dev/null)" == "SKIPPED " ]]
+}
+
 mark_migrated() {
   local name="$1"
   local group="${name:0:3}"
@@ -87,6 +92,15 @@ mark_migrated() {
   local desc
   desc=$(sed -n '2s/^# *//p' "$MIGRATIONS_DIR/$name")
   echo "${gname}: ${desc}" > "$STATE_DIR/$name"
+}
+
+mark_skipped() {
+  local name="$1"
+  local group="${name:0:3}"
+  local gname="${GROUP_NAMES[$group]}"
+  local desc
+  desc=$(sed -n '2s/^# *//p' "$MIGRATIONS_DIR/$name")
+  echo "SKIPPED ${gname}: ${desc}" > "$STATE_DIR/$name"
 }
 
 is_group_done() {
@@ -124,6 +138,7 @@ run_group() {
     local rc=0
     bash "$MIGRATIONS_DIR/$name" || rc=$?
     if [[ $rc -eq 2 ]]; then
+      mark_skipped "$name"
       continue
     elif [[ $rc -ne 0 ]]; then
       echo ""
@@ -164,7 +179,9 @@ for group in "${GROUP_ORDER[@]}"; do
   fi
   while IFS= read -r name; do
     [[ -n "$name" ]] || continue
-    if is_migrated "$name"; then
+    if is_skipped "$name"; then
+      items+=("  $name \033[0;33m(skipped)\033[0m")
+    elif is_migrated "$name"; then
       items+=("  $name \033[0;32m(done)\033[0m")
     else
       items+=("  $name \033[0;34m(not migrated)\033[0m")
@@ -183,6 +200,7 @@ selection=$(printf '%b\n' "${items[@]}" | fzf --ansi --prompt="migrate > " --hei
 selection=$(echo "$selection" | sed 's/\x1b\[[0-9;]*m//g')
 selection="${selection% (done)}"
 selection="${selection% (not migrated)}"
+selection="${selection% (skipped)}"
 selection="${selection#<}"; selection="${selection%>}"
 # strip leading whitespace
 selection="${selection#"${selection%%[![:space:]]*}"}"
@@ -222,7 +240,9 @@ elif [[ "$selection" == "[Migrate All]" ]]; then
   fi
 elif [[ "$selection" == *.sh ]]; then
   # single script
-  if is_migrated "$selection"; then
+  if is_skipped "$selection"; then
+    blue "skip $selection (previously skipped)"
+  elif is_migrated "$selection"; then
     blue "skip $selection (already migrated)"
   else
     echo "$selection"
@@ -230,7 +250,8 @@ elif [[ "$selection" == *.sh ]]; then
     rc=0
     bash "$MIGRATIONS_DIR/$selection" || rc=$?
     if [[ $rc -eq 2 ]]; then
-      blue "skip $selection (dependency not available)"
+      mark_skipped "$selection"
+      blue "skip $selection (skipped)"
     elif [[ $rc -eq 0 ]]; then
       mark_migrated "$selection"
       echo ""
