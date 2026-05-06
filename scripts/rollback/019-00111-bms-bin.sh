@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # bm-tool: rollback bm launcher + ghostty config + ephemeral caches.
-# Preserves chromium profile and saved-tabs.json across fast dev loops;
-# full clean-slate wipe happens in 020's rollback.
+# Preserves chromium profile across fast dev loops; full clean-slate
+# wipe happens in 020's rollback. saved-tabs.json is not touched
+# here or in 020 — it lives in the repo working tree as the
+# cross-machine sync source of truth.
 set -euo pipefail
 
 DST_BIN="$HOME/.local/bin/bm"
 DST_GHOSTTY="$HOME/.config/ghostty/bm.conf"
-DST_SAVED_DIR="$HOME/.config/omarchy/bm"
 BM_STATE_DIR="$HOME/.config/bm"
 BM_CACHE_DIR="$HOME/.cache/bm"
 
@@ -22,15 +23,6 @@ if [[ -f "$DST_GHOSTTY" ]]; then
   echo "  ghostty bm.conf: removed"
 else
   echo "  ghostty bm.conf: not present, skipping"
-fi
-
-# saved-tabs.json is the user's bookmark data — preserve across fast dev
-# cycles. Migration re-seeds only when absent, so leaving it is a no-op
-# on re-apply. Full removal happens in 020's rollback.
-if [[ -f "$DST_SAVED_DIR/saved-tabs.json" ]]; then
-  echo "  saved-tabs.json: preserved ($DST_SAVED_DIR/saved-tabs.json)"
-else
-  echo "  saved-tabs.json: not present, skipping"
 fi
 
 # Ephemeral bm UI state — safe to drop on every rollback. The TUI

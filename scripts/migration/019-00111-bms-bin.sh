@@ -1,30 +1,23 @@
 #!/usr/bin/env bash
-# bm-tool: install bm launcher, ghostty config, and seed saved-tabs.json
+# bm-tool: install bm launcher and ghostty config.
+# saved-tabs.json is no longer seeded — bm reads/writes it directly
+# from the repo (BM_SAVED_TABS in the launcher) so cross-machine sync
+# happens through git pull/push instead of a per-host copy.
 set -euo pipefail
 
 SRC_BIN="$REPO_DIR/files/local/bin/bm"
 SRC_GHOSTTY="$REPO_DIR/files/config/ghostty/bm.conf"
-SRC_SAVED="$REPO_DIR/files/config/omarchy/bm/saved-tabs.json"
 
 DST_BIN="$HOME/.local/bin/bm"
 DST_GHOSTTY="$HOME/.config/ghostty/bm.conf"
-DST_SAVED="$HOME/.config/omarchy/bm/saved-tabs.json"
 
-mkdir -p "$(dirname "$DST_BIN")" "$(dirname "$DST_GHOSTTY")" "$(dirname "$DST_SAVED")"
+mkdir -p "$(dirname "$DST_BIN")" "$(dirname "$DST_GHOSTTY")"
 
 install -m 0755 "$SRC_BIN" "$DST_BIN"
 echo "  bm launcher: $DST_BIN"
 
 install -m 0644 "$SRC_GHOSTTY" "$DST_GHOSTTY"
 echo "  ghostty bm.conf: $DST_GHOSTTY"
-
-# Don't overwrite an existing saved-tabs.json — the user's data wins.
-if [[ -f "$DST_SAVED" ]]; then
-  echo "  saved-tabs.json: already present (preserved)"
-else
-  install -m 0644 "$SRC_SAVED" "$DST_SAVED"
-  echo "  saved-tabs.json: seeded at $DST_SAVED"
-fi
 
 case ":$PATH:" in
   *":$HOME/.local/bin:"*) ;;

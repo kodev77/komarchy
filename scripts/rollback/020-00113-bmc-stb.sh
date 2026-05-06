@@ -1,24 +1,12 @@
 #!/usr/bin/env bash
-# bm-tool: full clean-slate rollback — removes saved-tabs.json AND the
-# entire bm state dir (chromium profile, UI state). Pair with 019's
-# rollback to return to a fresh-user baseline.
+# bm-tool: full clean-slate rollback — removes the entire bm state
+# dir (chromium profile, UI state). Pair with 019's rollback to return
+# to a fresh-user baseline. saved-tabs.json is intentionally not
+# touched: it lives in the repo working tree as the cross-machine sync
+# source of truth, so wiping it would destroy git-tracked data.
 set -euo pipefail
 
-SAVED="$HOME/.config/omarchy/bm/saved-tabs.json"
-SAVED_DIR="$HOME/.config/omarchy/bm"
 BM_STATE_DIR="$HOME/.config/bm"
-
-if [[ -f "$SAVED" ]]; then
-  rm -f "$SAVED"
-  echo "  saved-tabs.json: removed ($SAVED)"
-else
-  echo "  saved-tabs.json: not present, skipping"
-fi
-
-if [[ -d "$SAVED_DIR" ]] && [[ -z "$(ls -A "$SAVED_DIR")" ]]; then
-  rmdir "$SAVED_DIR"
-  echo "  saved-tabs dir: removed (empty)"
-fi
 
 # Full wipe of bm state — chromium profile, UI state files, everything
 # 019 intentionally preserved. Only runs during a deliberate "Rollback

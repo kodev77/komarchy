@@ -3,7 +3,9 @@ import os
 
 HOME = Path.home()
 
-SAVED_TABS = HOME / ".config" / "omarchy" / "bm" / "saved-tabs.json"
+# saved-tabs.json lives in the komarchy repo working tree so writes land
+# directly in git and sync across machines via pull/push.
+SAVED_TABS = HOME / "repo" / "komarchy" / "files" / "config" / "omarchy" / "bm" / "saved-tabs.json"
 STATE_FILE = HOME / ".config" / "bm" / "state.json"
 # PID of the running bm TUI, written on mount and removed on shutdown.
 # The external cycle keybind (Super+Alt+J/K via `bm next`/`bm prev`)

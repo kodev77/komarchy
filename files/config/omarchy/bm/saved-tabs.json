@@ -1,3 +1,225 @@
 {
-  "tabs": []
+  "version": 2,
+  "workspaces": [
+    {
+      "id": "07882dd463184b6b83242979c5bc2dc1",
+      "name": "KO"
+    },
+    {
+      "id": "6b82f5f91b0445ac87331020e74d6ab7",
+      "name": "RPC"
+    },
+    {
+      "id": "ce69a458319a4ad89c57b34eb3c4f883",
+      "name": "Reading"
+    }
+  ],
+  "tabs": [
+    {
+      "id": "06c95d1b82a4491ba5ec2a3bf8f2c525",
+      "title": "Gmail",
+      "url": "https://mail.google.com/mail/u/0/#inbox",
+      "group": "Home",
+      "added": "2026-04-29",
+      "workspace": "07882dd463184b6b83242979c5bc2dc1"
+    },
+    {
+      "id": "f5a76f8182034dffa97ada736e0fc32c",
+      "title": "YouTube",
+      "url": "https://www.youtube.com/",
+      "group": "Home",
+      "added": "2026-04-29",
+      "workspace": "07882dd463184b6b83242979c5bc2dc1"
+    },
+    {
+      "id": "f3c83bfede9b43d39a286e92d46257a4",
+      "title": "ChatGPT",
+      "url": "https://chatgpt.com/?utm_source=google&utm_medium=paid_search&utm_campaign=GOOG_C_SEM_GBR_Core_CHT_BAU_ACQ_PER_MIX_ALL_NAMER_US_EN_031126&c_id=23637266097&c_agid=196969199191&c_crid=799723769163&c_kwid=kwd-1931186779400&c_ims=&c_pms=9027166&c_nw=g&c_dvc=c&gad_source=1&gad_campaignid=23637266097&gbraid=0AAAAA-I0E5cHlWsFD6QTmQrnZUPc9fZmG&gclid=Cj0KCQjw2MbPBhCSARIsAP3jP9x4p0_XOr7wZ6rDg_nfDmYpyoh0Cz0HI9ff0d8r9Z7vuijYi9JxrU0aAuDREALw_wcB",
+      "group": "Essentials",
+      "added": "2026-04-29"
+    },
+    {
+      "id": "58cbf146e78541f089472c26f024498b",
+      "title": "Chase",
+      "url": "https://www.chase.com/",
+      "group": "Banking",
+      "added": "2026-04-29",
+      "workspace": "07882dd463184b6b83242979c5bc2dc1"
+    },
+    {
+      "id": "36b1cceba883444682763414bb615bf5",
+      "title": "Budget",
+      "url": "https://docs.google.com/spreadsheets/d/18fQ_FbrJ0huQZwS6oEJiGKf_wtRJutwTpamZOMZE-GI",
+      "group": "Banking",
+      "added": "2026-04-29",
+      "workspace": "07882dd463184b6b83242979c5bc2dc1"
+    },
+    {
+      "id": "fa8613c5edc648f681a0d3a2a216993c",
+      "title": "Yahoo Fantasy",
+      "url": "https://football.fantasysports.yahoo.com/f1/572201/10",
+      "group": "Misc",
+      "added": "2026-04-29",
+      "workspace": "07882dd463184b6b83242979c5bc2dc1"
+    },
+    {
+      "id": "509d269f24e448c988b6953637a58c5c",
+      "title": "ESPN Fantasy",
+      "url": "https://fantasy.espn.com/football/team?leagueId=113914867",
+      "group": "Misc",
+      "added": "2026-04-29",
+      "workspace": "07882dd463184b6b83242979c5bc2dc1"
+    },
+    {
+      "id": "782103a5f7744f54ab9405d2f94228bb",
+      "title": "Teams",
+      "url": "https://teams.cloud.microsoft/",
+      "group": "Home",
+      "added": "2026-04-29",
+      "workspace": "6b82f5f91b0445ac87331020e74d6ab7"
+    },
+    {
+      "id": "feb1ee712b9d401ea47a7d22ae929b6d",
+      "title": "Outlook",
+      "url": "https://outlook.cloud.microsoft/mail/",
+      "group": "Home",
+      "added": "2026-05-06",
+      "workspace": "6b82f5f91b0445ac87331020e74d6ab7"
+    },
+    {
+      "id": "c8eda019b06f4a428b1a6113e2525903",
+      "title": "Azure Portal",
+      "url": "https://portal.azure.com/#home",
+      "group": "Home",
+      "added": "2026-04-29",
+      "workspace": "6b82f5f91b0445ac87331020e74d6ab7"
+    },
+    {
+      "id": "511e6b91475f46acb3cd6385f9b6edd8",
+      "title": "Aspire Dashboard",
+      "url": "https://localhost:17022/",
+      "group": "Development",
+      "added": "2026-04-29",
+      "workspace": "6b82f5f91b0445ac87331020e74d6ab7"
+    },
+    {
+      "id": "97d53ae7a91444599d9169131bcd31d7",
+      "title": "JobTracker | Local Portal",
+      "url": "https://localhost:9001",
+      "group": "Development",
+      "added": "2026-04-29",
+      "workspace": "6b82f5f91b0445ac87331020e74d6ab7"
+    },
+    {
+      "id": "dd320f68355b4a0ea4422e19b91c0d7b",
+      "title": "JobTracker | Local Edge",
+      "url": "https://localhost:6001",
+      "group": "Development",
+      "added": "2026-04-29",
+      "workspace": "6b82f5f91b0445ac87331020e74d6ab7"
+    },
+    {
+      "id": "f439ddc933264fd8b7547787911fb5e9",
+      "title": "JobTracker | Cloud Portal",
+      "url": "https://app-jobtracker-portal-ui-dev-scus.azurewebsites.net",
+      "group": "Development",
+      "added": "2026-04-29",
+      "workspace": "6b82f5f91b0445ac87331020e74d6ab7"
+    },
+    {
+      "id": "e017b9d2e8434451a6207f938841798c",
+      "title": "Dynamics | FS02",
+      "url": "https://rpc-ue-dev-fs02.crm.dynamics.com/main.aspx?appid=ae2ac67f-cd0f-41eb-aa1f-7b07684b3d13",
+      "group": "Business",
+      "added": "2026-04-29",
+      "workspace": "6b82f5f91b0445ac87331020e74d6ab7"
+    },
+    {
+      "id": "ac64cbf996d84a389dbcdd289b9468b7",
+      "title": "Dynamics | SIT2",
+      "url": "https://operations-rpc-sit2.crm.dynamics.com/main.aspx?appid=5522c644-000c-f111-8406-70a8a5468006",
+      "group": "Business",
+      "added": "2026-04-29",
+      "workspace": "6b82f5f91b0445ac87331020e74d6ab7"
+    },
+    {
+      "id": "81342a3208e14ad2a6f8e37bf7df39d6",
+      "title": "Dynamics | UAT",
+      "url": "https://operations-rpcinc-uat.crm.dynamics.com/main.aspx?appid=6c9ed9f2-da40-f111-88b3-7ced8dcc02f3",
+      "group": "Business",
+      "added": "2026-04-30",
+      "workspace": "6b82f5f91b0445ac87331020e74d6ab7"
+    },
+    {
+      "id": "a1f17201b88143049875a91f4d96f41c",
+      "title": "Project Insight",
+      "url": "https://rpc.projectinsight.net/l.aspx?ReturnUrl=%2Fcontent%2Fdashboard%2Fdefault.aspx",
+      "group": "Office",
+      "added": "2026-04-29",
+      "workspace": "6b82f5f91b0445ac87331020e74d6ab7"
+    },
+    {
+      "id": "e39e2b27d543496c8f4189828e06d908",
+      "title": "Workday | RPC",
+      "url": "https://www.myworkday.com/rpcinc",
+      "group": "Office",
+      "added": "2026-04-29",
+      "workspace": "6b82f5f91b0445ac87331020e74d6ab7"
+    },
+    {
+      "id": "23f41281ddff47288b7f9be79421073c",
+      "title": "Settings",
+      "url": "chrome://settings/",
+      "group": "Chrome",
+      "added": "2026-04-29",
+      "workspace": "ce69a458319a4ad89c57b34eb3c4f883"
+    },
+    {
+      "id": "3c58be2bb3704a48aed80a375a8c9b09",
+      "title": "Password Manager",
+      "url": "chrome://password-manager/passwords",
+      "group": "Chrome",
+      "added": "2026-04-29",
+      "workspace": "ce69a458319a4ad89c57b34eb3c4f883"
+    },
+    {
+      "id": "a10b6667ba5845ad925ed2973634b806",
+      "title": "PowerApp | Backend",
+      "url": "https://make.powerapps.com",
+      "group": "Business",
+      "added": "2026-04-29",
+      "workspace": "6b82f5f91b0445ac87331020e74d6ab7"
+    },
+    {
+      "id": "a16945e2c89940f89563957e050630b1",
+      "title": "Google",
+      "url": "https://www.google.com/",
+      "group": "Essentials",
+      "added": "2026-05-01"
+    },
+    {
+      "id": "3bfe0e2443e34925affdf1c808a8614b",
+      "title": "Finance | Operations",
+      "url": "https://rpc-ue-dev-fs02.operations.dynamics.com/?cmp=425&mi=RPCProductReceiptJobTrackerDisplay",
+      "group": "Business",
+      "added": "2026-05-01",
+      "workspace": "6b82f5f91b0445ac87331020e74d6ab7"
+    },
+    {
+      "id": "ae720fa494e141d39195a395bc3af19a",
+      "title": "Azure DevOps",
+      "url": "https://dev.azure.com/RPCInc/",
+      "group": "Home",
+      "added": "2026-04-29",
+      "workspace": "6b82f5f91b0445ac87331020e74d6ab7"
+    },
+    {
+      "id": "d2556cadea1a49638a7e07b530531a53",
+      "title": "TRS-80 Color Computer Archive",
+      "url": "https://colorcomputerarchive.com/",
+      "group": "Misc",
+      "added": "2026-05-06",
+      "workspace": "07882dd463184b6b83242979c5bc2dc1"
+    }
+  ]
 }
