@@ -27,24 +27,19 @@ run_bm_py() {
 }
 
 cdp_up() {
-  curl -sSf -o /dev/null --max-time 0.5 "http://localhost:${CDP_PORT}/json/version" 2>/dev/null
-}
-
-wait_for_cdp() {
-  local deadline=$(( SECONDS + 15 ))
-  while (( SECONDS < deadline )); do
-    if cdp_up; then
-      return 0
-    fi
-    sleep 0.3
-  done
-  return 1
+  # --max-time 2: Arch's curl is built without c-ares, so sub-second timeouts
+  # fall back to SIGALRM (1s granularity) and curl aborts immediately with
+  # "remaining timeout … too small to resolve via SIGALRM method", so cdp_up
+  # would always return false even when chromium's CDP was live.
+  curl -sSf -o /dev/null --max-time 2 "http://localhost:${CDP_PORT}/json/version" 2>/dev/null
 }
 
 clear_crash_marker() {
   # Mark the prior shutdown as clean (keeps persistent cookies safe
   # through SIGTERM) and set restore_on_startup=1 so session cookies
-  # survive. The restored tab set is wiped post-launch by clean_tabs().
+  # survive. The restored tab set is wiped post-launch by bm-py's
+  # _wait_for_chromium_ready (which calls launcher.clean_tabs once
+  # CDP is up) on cold launches.
   local prefs="$PROFILE_DIR/Default/Preferences"
   [[ -f "$prefs" ]] || return 0
   command -v python3 >/dev/null 2>&1 || return 0
@@ -62,21 +57,6 @@ d.setdefault("session", {})["restore_on_startup"] = 1
 with open(p, "w") as f:
     json.dump(d, f)
 PY
-}
-
-clean_tabs() {
-  # Open a fresh blank tab and close every restored tab. Chromium had
-  # to restore the session (for cookie reasons) but we don't want to
-  # show those tabs to the user.
-  command -v curl >/dev/null 2>&1 || return 0
-  local ids
-  ids="$(curl -sSf --max-time 1 "http://localhost:${CDP_PORT}/json/list" 2>/dev/null \
-    | python3 -c "import json,sys; print('\n'.join(t['id'] for t in json.load(sys.stdin) if t.get('type')=='page'))" 2>/dev/null)"
-  [[ -n "$ids" ]] || return 0
-  curl -sSfX PUT --max-time 1 "http://localhost:${CDP_PORT}/json/new?about:blank" >/dev/null 2>&1 || return 0
-  while IFS= read -r id; do
-    [[ -n "$id" ]] && curl -sSfX PUT --max-time 1 "http://localhost:${CDP_PORT}/json/close/${id}" >/dev/null 2>&1 || true
-  done <<< "$ids"
 }
 
 launch_chromium() {
@@ -167,10 +147,17 @@ write_chromium_pid() {
   # --type= (renderer / zygote / gpu / utility children all carry
   # --type=, so excluding them isolates the main browser process).
   #
-  # Idempotent: re-writes on every start, including the cdp-already-up
-  # path (bm started while a previous chromium is still running).
-  local cpid
-  cpid="$(pgrep -af -- "--user-data-dir=$PROFILE_DIR" 2>/dev/null | grep -v -- "--type=" | head -1 | awk '{print $1}')"
+  # Brief retry: on cold launch we run right after launch_chromium &
+  # disown, when chromium's fork() has completed but exec might not
+  # have set the cmdline yet — pgrep can race. 3×50ms covers that
+  # without adding meaningful latency to the warm path (where pgrep
+  # finds the PID on the first try).
+  local cpid i
+  for i in 1 2 3; do
+    cpid="$(pgrep -af -- "--user-data-dir=$PROFILE_DIR" 2>/dev/null | grep -v -- "--type=" | head -1 | awk '{print $1}')"
+    [[ -n "$cpid" ]] && break
+    sleep 0.05
+  done
   if [[ -n "$cpid" ]]; then
     mkdir -p "$HOME/.config/bm"
     echo "$cpid" > "$HOME/.config/bm/chromium.pid"
@@ -194,10 +181,13 @@ self_ghostty_address() {
   while (( pid > 1 )); do
     comm="$(ps -o comm= -p "$pid" 2>/dev/null | tr -d ' ')"
     if [[ "$comm" == "ghostty" ]]; then
-      # Poll briefly — a just-mapped window may not be in hyprctl's
-      # client list yet.
+      # Poll up to ~1.5s — ghostty/GTK4 + hyprland surface registration
+      # can take several hundred ms on a cold start. The earlier 5×0.05
+      # cap (250ms) was racing the window-mapped event and missing it,
+      # which caused the async shrink_to_sidebar to silently no-op and
+      # the bm window to stay at the default 50/50 dwindle split.
       local i
-      for i in 1 2 3 4 5; do
+      for i in $(seq 1 30); do
         local addr
         addr="$(hyprctl clients -j 2>/dev/null | python3 -c "
 import json, sys
@@ -223,15 +213,66 @@ for c in json.load(sys.stdin):
 }
 
 shrink_to_sidebar() {
-  # Resize the given hyprland window to BM_SIDEBAR_WIDTH px wide, leaving
-  # the rest of the screen for chromium. No-op if no address or hyprland.
-  local addr="$1"
+  # Position + resize the bm window as a left-edge sidebar.
+  #
+  # Runs in a backgrounded subshell from cmd_interactive, so it does
+  # its own window lookup (self_ghostty_address) rather than receiving
+  # an address argument — keeping the polling out of cmd_interactive's
+  # foreground exec path. $$ in the subshell is still the parent bm
+  # bash's PID (subshells inherit $$), and after the parent exec's
+  # into bm-py the PID resolves to bm-py whose ppid is ghostty — so
+  # the ancestry walk finds ghostty either way.
+  #
+  # 1. movewindow l — dwindle places a new tile next to whichever window
+  #    had focus when ghostty mapped, which can land bm anywhere on the
+  #    screen. Nudging left is a no-op when bm is already leftmost.
+  # 2. delta-resize loop (om37) — on hyprland 0.54+ `resizeactive exact`
+  #    only resizes floating windows, so we compute the width delta
+  #    from the current size and dispatch relative-resize, iterating
+  #    until we converge within 10px of $width. Under dwindle with >2
+  #    tiles hyprland clamps a single big delta and only resizes
+  #    partway, so each pass closes the gap.
   local width="${BM_SIDEBAR_WIDTH:-300}"
+  local addr
+  addr="$(self_ghostty_address)"
   [[ -n "$addr" ]] || return 0
   command -v hyprctl >/dev/null 2>&1 || return 0
-  # Focus the terminal (chromium likely has focus after opening), then resize.
   hyprctl dispatch focuswindow address:"$addr" >/dev/null 2>&1 || true
-  hyprctl dispatch resizeactive exact "$width" 100% >/dev/null 2>&1 || true
+  sleep 0.05
+  # Iterate up to 8 times. On wide monitors (2K+) starting from a 50/50
+  # tile means a delta of ~−2200, which hyprland silently clamps per
+  # dispatch — so multiple passes are required to converge. Per-pass
+  # 0.15s sleep gives hyprland's layout pipeline time to commit before
+  # we re-query width (at 0.08s the next query returned the pre-resize
+  # value and wasted an iteration). Per-iteration delta capped at ±800
+  # because hyprland silently rejects very large deltas on tiled
+  # windows; smaller chunks reliably commit. focuswindow + resizeactive
+  # issued in a single hyprctl --batch transaction so the resizeactive
+  # can't race a focus-steal from chromium spawning between dispatches.
+  #
+  # No movewindow l. In dwindle, `movewindow l` swaps the WINDOWS
+  # between two slots while preserving the SLOTS — bm (300px left
+  # slot) and chromium (~2200px right slot) trade positions but each
+  # inherits the destination slot's size. Net effect: bm bounces back
+  # to ~2200px and the resize work is undone. Whichever side dwindle
+  # places bm on is fine; if explicit-left is needed, solve it via a
+  # hyprland windowrule, not a post-hoc dispatch.
+  local cur_w_ delta_ i
+  for i in 1 2 3 4 5 6 7 8; do
+    cur_w_=$(hyprctl clients -j 2>/dev/null | python3 -c "import json,sys; print(next((w['size'][0] for w in json.load(sys.stdin) if w.get('address')=='$addr'), 0))" 2>/dev/null) || cur_w_=0
+    if [[ -z "$cur_w_" || "$cur_w_" -le 0 ]]; then
+      break
+    fi
+    delta_=$(( width - cur_w_ ))
+    if (( delta_ >= -10 && delta_ <= 10 )); then
+      break
+    fi
+    if (( delta_ < -800 )); then delta_=-800; fi
+    if (( delta_ > 800 )); then delta_=800; fi
+    hyprctl --batch "dispatch focuswindow address:$addr ; dispatch resizeactive $delta_ 0" >/dev/null 2>&1 || true
+    sleep 0.15
+  done
+  hyprctl dispatch focuswindow address:"$addr" >/dev/null 2>&1 || true
 }
 
 cmd_interactive() {
@@ -244,23 +285,16 @@ cmd_interactive() {
     exit 1
   fi
 
-  # Look up our terminal's hyprland address by walking process
-  # ancestry to the parent ghostty. PID-based — doesn't depend on
-  # focus state, which is unreliable here: when bm is spawned via
-  # `bm focus`, the just-created ghostty may not have stolen focus
-  # yet, so activewindow could report chromium or whatever the user
-  # was in. Resizing the wrong window's why bm sometimes opened in
-  # the default 50/50 tile instead of as a sidebar.
-  local terminal_addr
-  terminal_addr="$(self_ghostty_address)"
-
+  # Cold-launch chromium if needed, but do NOT wait for CDP here —
+  # bm-py's _wait_for_chromium_ready (in BmApp.on_mount) drives CDP
+  # readiness + clean_tabs asynchronously after the TUI paints, hiding
+  # the ~1s chromium init behind user-visible content. BM_COLD_LAUNCH
+  # signals to bm-py that this run spawned chromium fresh and the
+  # post-restore clean_tabs sweep should fire (warm runs preserve
+  # whatever tabs the user already had open).
   if ! cdp_up; then
     launch_chromium
-    if ! wait_for_cdp; then
-      echo "chromium did not expose CDP on :${CDP_PORT}" >&2
-      exit 1
-    fi
-    clean_tabs
+    export BM_COLD_LAUNCH=1
   fi
 
   # Always (re)write chromium.pid — covers both fresh-launch and
@@ -268,13 +302,15 @@ cmd_interactive() {
   # for Super+Alt+L; without it the binding is a silent no-op.
   write_chromium_pid
 
-  # Always size bm as the sidebar so chromium gets the rest of the
-  # screen. Previously this was inside the `! cdp_up` block, so bm
-  # opened at default ghostty size when chromium was already running
-  # (session-restored, leftover from a crash, or manually launched).
-  # cdp_up == True implies chromium exists, so the shrink is always
-  # appropriate by the time we reach here.
-  shrink_to_sidebar "$terminal_addr"
+  # Async sidebar placement: shrink_to_sidebar runs in a backgrounded
+  # subshell — it does its own window-address lookup (so cmd_interactive
+  # doesn't block on hyprland-registration polling) and overlaps with
+  # bm-py's Textual startup (~500ms-1s) instead of being a serial
+  # blocker before exec. The visual resize lands a moment AFTER the
+  # TUI first paints, which is visually fine — content is already
+  # there for the user to read while the window finds its width.
+  ( shrink_to_sidebar ) >/dev/null 2>&1 &
+  disown
 
   # Advertise "bm" as the terminal title (OSC 2) so the window is also
   # identifiable by title. Not required by `bm focus` (which uses process
@@ -288,25 +324,25 @@ cmd_interactive() {
 }
 
 find_bm_ghostty_pid() {
-  # Walk up bm-py's process tree to find the ghostty ancestor. Matching by
-  # process ancestry is robust against terminal-title quirks (ghostty shows
-  # the command name when -e is used, Textual's OSC update doesn't always
-  # land, tmux hijacks the title, etc.).
-  local bm_pid pid comm parent
-  bm_pid="$(pgrep -x bm-py 2>/dev/null | head -1)"
-  [[ -n "$bm_pid" ]] || return 1
-  pid="$bm_pid"
-  while (( pid > 1 )); do
-    comm="$(ps -o comm= -p "$pid" 2>/dev/null | tr -d ' ')"
-    if [[ "$comm" == "ghostty" ]]; then
-      echo "$pid"
-      return 0
-    fi
-    parent="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')"
-    [[ -n "$parent" && "$parent" != "$pid" ]] || return 1
-    pid="$parent"
-  done
-  return 1
+  # Find a hyprland window of class com.ko.bm and return its pid. Used
+  # by cmd_focus to decide whether to focus an existing bm or spawn a
+  # new one. Replaces a prior `pgrep -x bm-py | head -1` + ancestry
+  # walk: that picked the OLDEST bm-py, which on omarchy 3.7+ often
+  # pointed to an orphan ghostty whose window had already been closed
+  # — focus_hyprland_window_by_pid would then return 1 and cmd_focus
+  # would spawn yet another ghostty even though a working bm window
+  # already existed. Class-based lookup short-circuits the orphan trap.
+  command -v hyprctl >/dev/null 2>&1 || return 1
+  local pid
+  pid="$(hyprctl clients -j 2>/dev/null | python3 -c "
+import json, sys
+for c in json.load(sys.stdin):
+    if c.get('class') == 'com.ko.bm':
+        print(c.get('pid', ''))
+        break
+" 2>/dev/null)"
+  [[ -n "$pid" && "$pid" != "0" ]] || return 1
+  echo "$pid"
 }
 
 focus_hyprland_window_by_pid() {
@@ -326,43 +362,15 @@ for c in json.load(sys.stdin):
   return 0
 }
 
-find_bm_window_address() {
-  command -v hyprctl >/dev/null 2>&1 || return 1
-  hyprctl clients -j 2>/dev/null | python3 -c "
-import json, sys
-for c in json.load(sys.stdin):
-    if c.get('class') == 'com.ko.bm':
-        print(c.get('address', ''))
-        break
-"
-}
-
-place_bm_as_sidebar() {
-  # After spawning, move bm to the left of the workspace and shrink it to
-  # sidebar width. Polls for the window to appear first since ghostty/GTK
-  # takes a moment to register with hyprland.
-  command -v hyprctl >/dev/null 2>&1 || return 0
-  local width="${BM_SIDEBAR_WIDTH:-300}"
-  local deadline=$(( SECONDS + 5 ))
-  local addr=""
-  while (( SECONDS < deadline )); do
-    addr="$(find_bm_window_address)"
-    [[ -n "$addr" ]] && break
-    sleep 0.1
-  done
-  [[ -n "$addr" ]] || return 0
-  hyprctl dispatch focuswindow address:"$addr" >/dev/null 2>&1 || true
-  # Dwindle places the new window wherever focus was; nudge it to the far
-  # left so it sits as a sidebar next to chromium. movewindow is a no-op
-  # if bm is already leftmost.
-  hyprctl dispatch movewindow l >/dev/null 2>&1 || true
-  hyprctl dispatch resizeactive exact "$width" 100% >/dev/null 2>&1 || true
-}
-
 cmd_focus() {
   # Focus the existing bm window if one is running; otherwise spawn a new
   # ghostty (with bm config) and run bm inside it. Intended for hyprland
   # keybinds where there's no parent terminal.
+  #
+  # Spawn case: setsid + disown the ghostty and return immediately.
+  # cmd_interactive (running inside the new ghostty) handles the sidebar
+  # placement asynchronously, so cmd_focus doesn't block waiting for the
+  # window to register and resize.
   local ghostty_pid
   if ghostty_pid="$(find_bm_ghostty_pid)"; then
     if focus_hyprland_window_by_pid "$ghostty_pid"; then
@@ -378,7 +386,6 @@ cmd_focus() {
     -e "$0" \
     </dev/null >/dev/null 2>&1 &
   disown
-  place_bm_as_sidebar
 }
 
 case "${1:-}" in

@@ -1,9 +1,10 @@
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Optional
 import asyncio
+import json
 import os
 import signal
+import subprocess
 import time
 from urllib.parse import urlsplit
 
@@ -19,7 +20,42 @@ from textual.widgets import Tree
 from textual.widgets.tree import TreeNode
 
 from . import actions, cdp, favicon, launcher, store, theme as bm_theme
-from .paths import PID_FILE, ensure_dirs
+from .paths import CHROMIUM_PID, PID_FILE, ensure_dirs
+
+
+def _fast_close_and_exit() -> None:
+    """Kill the bm-managed chromium directly by PID, drop the bm pidfile,
+    and `os._exit(0)`. The single fast-shutdown path used by every bm
+    teardown trigger — q/Esc keybinds, hyprland's closewindow event for
+    Super+W, and SIGHUP/SIGTERM signal handlers all funnel through this.
+    Skips launcher.close_chromium's CDP teardown (httpx + per-tab
+    /json/close + PID-exit poll up to 3s) and Textual's exit machinery
+    in favor of: SIGTERM the chromium pid, sleep 1.0s for chromium's own
+    graceful-exit handler to run (cookies flush + session writes), then
+    SIGKILL anything that didn't die. os._exit bypasses atexit so we
+    don't re-enter the slow CDP path that this helper exists to avoid.
+    """
+    cpid: Optional[int] = None
+    try:
+        cpid_text = CHROMIUM_PID.read_text().strip()
+        cpid = int(cpid_text) if cpid_text else None
+    except (FileNotFoundError, ValueError, OSError):
+        pass
+    if cpid is not None:
+        try:
+            os.kill(cpid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+        time.sleep(1.0)
+        try:
+            os.kill(cpid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+    try:
+        PID_FILE.unlink()
+    except (FileNotFoundError, OSError):
+        pass
+    os._exit(0)
 
 REFRESH_SECONDS = 0.3
 
@@ -969,6 +1005,38 @@ class BmApp(App):
             )
         except (NotImplementedError, RuntimeError):
             pass
+        # om37: watch hyprland's IPC event socket for our window's
+        # closewindow event. On hyprland 0.54+ / ghostty 1.3+, Super+W
+        # destroys the GTK surface but ghostty does NOT reliably exit
+        # the process, so the PTY stays alive and bm-py never receives
+        # SIGHUP — the original "Super+W -> ghostty exits -> SIGHUP ->
+        # _cleanup() -> close_chromium" chain breaks at hop #1, leaving
+        # chromium open. Listening directly to hyprland sidesteps the
+        # broken intermediary.
+        # Stash the task on self: asyncio holds only weak refs to tasks
+        # (see https://docs.python.org/3/library/asyncio-task.html#asyncio.create_task),
+        # so a bare `asyncio.create_task(...)` can be GC'd before it
+        # runs. Verified empirically — without this attribute, bm-py
+        # never opened a connection to .socket2.sock.
+        try:
+            self._close_watcher_task = asyncio.create_task(
+                self._watch_hyprland_close()
+            )
+        except RuntimeError:
+            self._close_watcher_task = None
+        # Async chromium-ready driver. The bash launcher only spawns
+        # chromium and exec's bm-py — no synchronous wait_for_cdp /
+        # clean_tabs blocking before the TUI starts. We pick up that
+        # work here on the asyncio loop so bm-py's UI paints
+        # immediately, with live-tab indicators populating once CDP is
+        # ready (~1s on cold start). Same weak-ref GC caveat as the
+        # close watcher applies — stash on self.
+        try:
+            self._chromium_ready_task = asyncio.create_task(
+                self._wait_for_chromium_ready()
+            )
+        except RuntimeError:
+            self._chromium_ready_task = None
         self.set_interval(REFRESH_SECONDS, self._refresh_live)
         self.set_interval(0.5, self._blink_cursor)
         tree = self.query_one("#tree", FolderTree)
@@ -978,6 +1046,108 @@ class BmApp(App):
         # Any motion action (j/k, external cycle, etc.) reactivates it
         # via _activate_cursor.
         tree.cursor_active = False
+
+    def _find_own_window_address(self) -> Optional[str]:
+        # Resolve our hyprland window address. Prefer pid+class match
+        # (exact: ghostty's pid via getppid + bm class). Fall back to
+        # class-only because some compositor configurations report a
+        # child process's pid for the GTK surface rather than ghostty's
+        # own pid. Class-only is safe given the 023-00127 focus fix
+        # (one com.ko.bm window per session).
+        try:
+            result = subprocess.run(
+                ["hyprctl", "clients", "-j"],
+                capture_output=True, text=True, timeout=1,
+            )
+            if result.returncode != 0:
+                return None
+            clients = json.loads(result.stdout)
+            target = os.getppid()
+            for c in clients:
+                if c.get("pid") == target and c.get("class") == "com.ko.bm":
+                    addr = c.get("address")
+                    if addr:
+                        return addr
+            for c in clients:
+                if c.get("class") == "com.ko.bm":
+                    addr = c.get("address")
+                    if addr:
+                        return addr
+        except (subprocess.SubprocessError, json.JSONDecodeError, OSError):
+            pass
+        return None
+
+    async def _wait_for_chromium_ready(self, timeout: float = 15.0) -> None:
+        # Drive chromium-readiness asynchronously after the bash
+        # launcher fired `launch_chromium` and exec'd into bm-py
+        # without waiting for CDP. Polls cdp.is_up every 0.3s on the
+        # event loop (sync httpx calls offloaded to a thread pool so
+        # they don't block Textual's render). On success, runs
+        # launcher.clean_tabs ONLY when the bash launcher set
+        # BM_COLD_LAUNCH=1 — i.e. chromium was just spawned this run
+        # and the restored-session tabs need to be replaced with a
+        # single about:blank. Warm-start runs preserve whatever the
+        # user already had open.
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while loop.time() < deadline:
+            try:
+                up = await loop.run_in_executor(None, cdp.is_up)
+            except Exception:
+                up = False
+            if up:
+                if os.environ.get("BM_COLD_LAUNCH") == "1":
+                    try:
+                        await loop.run_in_executor(None, launcher.clean_tabs)
+                    except Exception:
+                        pass
+                return
+            await asyncio.sleep(0.3)
+
+    async def _watch_hyprland_close(self) -> None:
+        # Stream hyprland IPC events; on `closewindow>>ADDR` for our
+        # own window, kill chromium directly and os._exit. Address
+        # comparison strips the 0x prefix that hyprctl reports but
+        # the event socket omits.
+        his = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE")
+        runtime = os.environ.get("XDG_RUNTIME_DIR")
+        if not his or not runtime:
+            return
+        sock_path = f"{runtime}/hypr/{his}/.socket2.sock"
+        # Ghostty/GTK may take a moment to register the window with
+        # hyprland after on_mount fires. Poll briefly so we don't bail
+        # out before the address exists.
+        own_addr: Optional[str] = None
+        for _ in range(50):
+            own_addr = self._find_own_window_address()
+            if own_addr:
+                break
+            await asyncio.sleep(0.1)
+        if not own_addr:
+            return
+        needle = own_addr[2:] if own_addr.startswith("0x") else own_addr
+        try:
+            reader, writer = await asyncio.open_unix_connection(sock_path)
+        except (OSError, FileNotFoundError):
+            return
+        try:
+            while True:
+                line = await reader.readline()
+                if not line:
+                    return
+                text = line.decode("utf-8", errors="ignore").strip()
+                if not text.startswith("closewindow>>"):
+                    continue
+                if text.split(">>", 1)[1] != needle:
+                    continue
+                _fast_close_and_exit()
+        except (OSError, ConnectionError):
+            pass
+        finally:
+            try:
+                writer.close()
+            except Exception:
+                pass
 
     def _blink_cursor(self) -> None:
         # Expire status messages whose timeout has elapsed.
@@ -4394,8 +4564,8 @@ class BmApp(App):
             tree.cursor_active = False
             return
         # bm and chromium are paired — closing one closes the other.
-        launcher.close_chromium()
-        self.exit()
+        # Same fast-kill path Super+W uses; see _fast_close_and_exit.
+        _fast_close_and_exit()
 
     def action_quit(self) -> None:
         # `q` is the quick-exit shortcut: skips the Esc tier ladder
@@ -4404,8 +4574,7 @@ class BmApp(App):
         # already swallow `q` in on_key (treats it as a printable char or
         # a no-op), so this binding only fires from the normal idle
         # state, where "immediately quit" is what the user wants.
-        launcher.close_chromium()
-        self.exit()
+        _fast_close_and_exit()
 
     def _activate_cursor(self) -> None:
         """Reactivate the hover-dim overlay after Esc has parked the
@@ -4722,16 +4891,31 @@ HELP_LINES = [
 
 def run_tui() -> None:
     import atexit, sys
-    # Esc → action_quit_to_browser (tier-by-tier dismissal); q →
-    # action_quit (immediate). Both end at launcher.close_chromium +
-    # self.exit, then atexit runs _cleanup below.
-    # sys.exit / Textual's exit path → atexit.
-    # Super+W / window close → ghostty dies, bm-py gets SIGHUP. atexit
-    # does not fire for SIGHUP/SIGTERM, so install signal handlers too.
+    # Exit paths — every trigger funnels into the same fast PID-kill +
+    # os._exit(0) path (_fast_close_and_exit, defined at module top):
+    #   q                       → action_quit
+    #   Esc (idle, no modal)    → action_quit_to_browser
+    #   Super+W via hyprland    → _watch_hyprland_close (closewindow IPC)
+    #   SIGHUP / SIGTERM        → _term
+    #   self.exit / sys.exit    → atexit _cleanup (best-effort fallback)
+    #
+    # On omarchy 3.7 / hyprland 0.54+ / ghostty 1.3+, surface-destroy
+    # delivers SIGHUP+SIGTERM repeatedly (~ms apart). The pre-3.7 design
+    # had q/Esc do a CDP cookie-flush via launcher.close_chromium (httpx
+    # + SSL init + per-tab /json/close + 1.5s PID-exit poll) which made
+    # q feel laggy (~5s) even though chromium's UI was already gone, and
+    # had _term/_cleanup re-enter the same heavy path under the signal
+    # cascade — recursing through ssl.create_default_context until
+    # RecursionError pinned bm-py at 100% CPU with chromium still alive.
+    #
+    # Current design: chromium handles SIGTERM with its normal cookie-
+    # persistence + session-write path, so a 1.0s grace before SIGKILL
+    # gives the same durability the CDP route did, an order of magnitude
+    # faster, and with no signal-race re-entry. The atexit _cleanup is
+    # only reached if BmApp.run() returns normally without going through
+    # one of the above paths (shouldn't happen in practice).
     def _cleanup() -> None:
         launcher.close_chromium()
-        # Remove our PID file so the next `bm next`/`bm prev` press
-        # doesn't signal a dead process (or worse, a reused PID).
         try:
             PID_FILE.unlink()
         except FileNotFoundError:
@@ -4742,8 +4926,14 @@ def run_tui() -> None:
     atexit.register(_cleanup)
 
     def _term(_signum, _frame):
-        _cleanup()
-        sys.exit(0)
+        # Disable signal-driven re-entry first (subsequent SIGHUP/SIGTERM
+        # are ignored), then funnel into the shared fast-close path.
+        for sig_to_block in (signal.SIGHUP, signal.SIGTERM):
+            try:
+                signal.signal(sig_to_block, signal.SIG_IGN)
+            except (ValueError, OSError):
+                pass
+        _fast_close_and_exit()
 
     for sig in (signal.SIGHUP, signal.SIGTERM):
         try:

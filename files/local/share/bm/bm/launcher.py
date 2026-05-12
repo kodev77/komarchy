@@ -3,20 +3,57 @@
 import json
 import os
 import shutil
+import signal
 import subprocess
+import threading
 import time
 
 from . import cdp
 from .paths import CHROMIUM_PID, CHROMIUM_PROFILE, CDP_PORT
 
 
+# Re-entry guard. close_chromium gets called from atexit, action_quit,
+# action_quit_to_browser, and run_tui's _term — and on omarchy 3.7 these
+# can fire close together when a SIGHUP/SIGTERM cascade interrupts an
+# in-flight call. The full CDP teardown takes ~1–3s of slow blocking I/O
+# (httpx + SSL init); without this guard, signal-driven re-entry stacks
+# the recursion until cdp.list_tabs raises RecursionError and bm-py
+# spins at 100% CPU. Only the first call runs the teardown.
+_close_lock = threading.Lock()
+_close_done = False
+
+
 def close_chromium() -> None:
-    """Close chromium by closing every tab via CDP so the browser runs
-    its normal clean-exit path (the same one the user gets from File →
-    Quit). That path flushes session cookies — SIGTERM does NOT, which
-    is why auth for sites like portal.azure.com was being dropped when
-    bm closed chromium with pkill alone. pkill runs as a fallback if
-    CDP is unreachable or chromium doesn't exit promptly."""
+    """Tear down chromium with an escalation ladder so a single stuck
+    tab can't leave the browser running:
+      1. CDP /json/close every page Target. Cookie-flush path —
+         chromium runs its normal clean-exit when the last tab closes,
+         persisting session cookies (e.g. portal.azure.com auth).
+      2. Wait up to 1.5s for chromium to exit on its own.
+      3. SIGTERM the main chromium process directly by PID. Catches
+         the case where one page refused /json/close (beforeunload
+         handler, CDP-blocked dialog) and chromium therefore never
+         reached the last-window-closed path.
+      4. Wait another 1.5s for SIGTERM to take effect.
+      5. SIGKILL — when chromium is genuinely stuck. Cookies may not
+         flush, but the browser MUST die.
+    Falls back to pkill --user-data-dir matching when chromium.pid is
+    missing (e.g. chromium was launched outside bm-py)."""
+    global _close_done
+    if _close_done:
+        return
+    if not _close_lock.acquire(blocking=False):
+        return
+    try:
+        if _close_done:
+            return
+        _close_chromium_inner()
+        _close_done = True
+    finally:
+        _close_lock.release()
+
+
+def _close_chromium_inner() -> None:
     try:
         tabs = cdp.list_tabs()
         for t in tabs:
@@ -26,26 +63,63 @@ def close_chromium() -> None:
                 pass
     except Exception:
         pass
-    # Give chromium time to finish its clean shutdown.
-    deadline = time.monotonic() + 2.0
-    while time.monotonic() < deadline:
-        if not cdp.is_up():
-            _drop_chromium_pid()
-            return
-        time.sleep(0.1)
-    # CDP never went away — fall back to pkill.
-    if not shutil.which("pkill"):
+    cpid = _read_chromium_pid()
+    if _wait_for_exit(cpid, 1.5):
         _drop_chromium_pid()
         return
+    _signal_chromium(cpid, signal.SIGTERM)
+    if _wait_for_exit(cpid, 1.5):
+        _drop_chromium_pid()
+        return
+    _signal_chromium(cpid, signal.SIGKILL)
+    _drop_chromium_pid()
+
+
+def _read_chromium_pid() -> "int | None":
+    try:
+        return int(CHROMIUM_PID.read_text().strip())
+    except (FileNotFoundError, ValueError, OSError):
+        return None
+
+
+def _wait_for_exit(pid: "int | None", timeout: float) -> bool:
+    """Return True iff chromium has exited by the deadline. Uses the
+    PID's liveness directly when available (instant), otherwise polls
+    CDP — slower because CDP can briefly stay reachable while chromium
+    is mid-shutdown, but it's the only signal we have without a PID."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if pid is not None:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return True
+            except PermissionError:
+                pass  # exists but un-signalable; keep polling
+        elif not cdp.is_up():
+            return True
+        time.sleep(0.1)
+    return False
+
+
+def _signal_chromium(pid: "int | None", sig: int) -> None:
+    if pid is not None:
+        try:
+            os.kill(pid, sig)
+        except (ProcessLookupError, PermissionError):
+            pass
+        return
+    if not shutil.which("pkill"):
+        return
+    flag = "-KILL" if sig == signal.SIGKILL else "-TERM"
     try:
         subprocess.run(
-            ["pkill", "-TERM", "-f", f"user-data-dir={CHROMIUM_PROFILE}"],
+            ["pkill", flag, "-f", f"user-data-dir={CHROMIUM_PROFILE}"],
             capture_output=True,
             timeout=2,
         )
     except (subprocess.SubprocessError, OSError):
         pass
-    _drop_chromium_pid()
 
 
 def _drop_chromium_pid() -> None:
