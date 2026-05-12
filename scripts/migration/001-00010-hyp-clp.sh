@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
-# hyprland: terminal calendar app for waybar clock right-click
+# hyprland: waycal calendar popup for waybar clock right-click
 set -euo pipefail
 
-if pacman -Qi lvsk-calendar &>/dev/null; then
-  echo "lvsk-calendar already installed"
+if pacman -Qi waycal &>/dev/null; then
+  echo "waycal already installed"
 else
-  echo "installing lvsk-calendar..."
+  echo "installing waycal..."
   if command -v paru &>/dev/null; then
-    paru -S --noconfirm lvsk-calendar
+    paru -S --noconfirm waycal
   elif command -v yay &>/dev/null; then
-    yay -S --noconfirm lvsk-calendar
+    yay -S --noconfirm waycal
   else
-    echo "no aur helper found (paru/yay), cannot install lvsk-calendar"
+    echo "no aur helper found (paru/yay), cannot install waycal"
     exit 1
   fi
-  echo "lvsk-calendar installed"
+  echo "waycal installed"
 fi

@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# hyprland: rollback terminal calendar app
+# hyprland: rollback waycal calendar popup
 set -euo pipefail
 
-if pacman -Qi lvsk-calendar &>/dev/null; then
-  echo "removing lvsk-calendar..."
-  sudo pacman -R --noconfirm --noscriptlet lvsk-calendar
-  echo "lvsk-calendar removed"
+if pacman -Qi waycal &>/dev/null; then
+  echo "removing waycal..."
+  sudo pacman -Rns --noconfirm waycal
+  echo "waycal removed"
 else
-  echo "lvsk-calendar not installed, skipping"
+  echo "waycal not installed, skipping"
 fi
