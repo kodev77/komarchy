@@ -1,0 +1,15 @@
+{
+  "name": "bm-extension",
+  "version": "0.1.0",
+  "private": true,
+  "description": "bm bookmark manager — Chromium extension",
+  "scripts": {
+    "build": "tsc && node scripts/copy-static.mjs",
+    "watch": "tsc --watch",
+    "clean": "rm -rf dist"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.270",
+    "typescript": "^5.5.0"
+  }
+}

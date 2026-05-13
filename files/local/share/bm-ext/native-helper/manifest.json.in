@@ -1,0 +1,9 @@
+{
+  "name": "com.ko.bm_store",
+  "description": "bm saved-tabs.json read/write helper",
+  "path": "__HELPER_PATH__",
+  "type": "stdio",
+  "allowed_origins": [
+    "chrome-extension://__EXTENSION_ID__/"
+  ]
+}

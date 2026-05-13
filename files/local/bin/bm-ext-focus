@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+# bm-ext-focus — focus chromium and open/focus the bm side panel from
+# anywhere on the desktop.
+#
+# Bound to Super+Alt+H via Hyprland. Single keystroke from any app
+# lands keyboard focus in the bm sidebar, ready for j/k.
+#
+# Two paths depending on whether the panel is currently open. CDP
+# (--remote-debugging-port=9222) tells us which case we're in:
+#
+#   1. Panel CLOSED (no sidepanel.html target in CDP's list):
+#      Send Alt+Shift+B via wtype once. That fires chromium's
+#      `_execute_action` handler, which opens AND focuses the side
+#      panel in one shot (chromium-internal magic — no extension API
+#      can do this).
+#
+#   2. Panel OPEN (sidepanel.html target appears in CDP's list):
+#      Send Alt+Shift+B TWICE with a small delay. The action handler
+#      is toggle-on-second-press, so the first press closes the panel,
+#      the second reopens it through the same chromium-internal handler
+#      that gives proper frame focus. Brief flicker (~50ms) is the
+#      cost of getting reliable refocus. CDP's /json/activate/<id>
+#      acknowledges activation but doesn't actually move frame focus
+#      for side panel targets, so it's not a workable alternative.
+#
+# Both paths require chromium to be the focused window first so the
+# keystrokes route there.
+
+set -euo pipefail
+
+CDP_PORT="${BM_CDP_PORT:-9222}"
+
+# Pull chromium to the front. class:chromium covers stock Chromium on
+# Wayland (lowercase app_id). Error swallowed so we still attempt the
+# keystroke when chromium is in an unusual state.
+hyprctl dispatch focuswindow class:chromium >/dev/null 2>&1 || true
+
+# Wait for chromium to actually have keyboard focus before any
+# keystroke. 60ms turned out to be too tight when chromium was on
+# another workspace and Hyprland was animating the window switch —
+# 120ms is more reliable and still imperceptible to the user.
+sleep 0.12
+
+# True iff CDP reports a side-panel page target right now.
+panel_open() {
+  local list_json
+  list_json=$(
+    curl -sSf --max-time 1 "http://localhost:${CDP_PORT}/json/list" 2>/dev/null
+  ) || return 1
+  printf '%s' "$list_json" | grep -q 'sidepanel\.html'
+}
+
+# Single _execute_action keystroke. wtype modifier syntax: -M presses,
+# -m releases. Captured in a function so the dual-press path can call
+# it twice cleanly.
+send_action_key() {
+  wtype -M alt -M shift b -m alt -m shift
+}
+
+if panel_open; then
+  # Panel is open. Close-and-reopen so the second press's
+  # chromium-internal action handler can give us frame focus.
+  # A fixed sleep between presses isn't enough — chromium's panel
+  # teardown takes variable time depending on where frame focus
+  # lands after close (tab, address bar, etc.). Poll CDP until the
+  # target is gone, then send the reopen press. Capped at ~500ms so
+  # we don't hang if something goes wrong.
+  send_action_key
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    sleep 0.05
+    panel_open || break
+  done
+  send_action_key
+else
+  # Panel is closed (or CDP unreachable). Single press opens + focuses
+  # through chromium's internal action handler.
+  send_action_key
+fi

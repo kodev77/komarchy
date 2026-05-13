@@ -1,0 +1,35 @@
+{
+  "manifest_version": 3,
+  "name": "bm — bookmark manager",
+  "version": "0.1.0",
+  "description": "Workspace-scoped bookmarks via git-tracked saved-tabs.json. Replaces the bm TUI.",
+  "permissions": [
+    "tabs",
+    "sidePanel",
+    "nativeMessaging",
+    "storage"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "action": {
+    "default_title": "Open bm"
+  },
+  "commands": {
+    "_execute_action": {
+      "suggested_key": {
+        "default": "Alt+Shift+B"
+      }
+    },
+    "save-current-tab": {
+      "suggested_key": {
+        "default": "Alt+Shift+S"
+      },
+      "description": "Save current tab to bm"
+    }
+  }
+}
