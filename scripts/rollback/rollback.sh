@@ -15,11 +15,12 @@ declare -A GROUP_NAMES=(
   [016]="dataverse" [017]="db2" [018]="updates" [019]="bm-tool"
   [020]="bm-tool" [021]="updates" [022]="retro" [023]="bm-tool-om37"
   [024]="retro-emu" [025]="updates-om37" [027]="bm-chromium"
+  [028]="bm-tool-alc"
 )
 # 027-bm-chromium is shelved — see migrate.sh for context. Kept in
 # GROUP_NAMES so the rollback scripts retain their name association
 # if the group is later reactivated by re-adding to GROUP_ORDER.
-GROUP_ORDER=(000 001 002 003 004 005 006 007 008 009 010 011 012 013 014 015 016 017 018 019 020 021 022 023 024 025)
+GROUP_ORDER=(000 001 002 003 004 005 006 007 008 009 010 011 012 013 014 015 016 017 018 019 020 021 022 023 024 025 028)
 
 red()   { printf '\033[0;31m%s\033[0m\n' "$*"; }
 green() { printf '\033[0;32m%s\033[0m\n' "$*"; }

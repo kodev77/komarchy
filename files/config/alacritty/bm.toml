@@ -1,0 +1,35 @@
+# bm — dedicated Alacritty config for the bm TUI.
+# Applied via `alacritty --config-file=...`. Alacritty's --config-file
+# REPLACES the default config rather than layering on top of it, so
+# anything we want to inherit (font family, size, theme) has to be
+# pulled in explicitly via general.import. Without the import, the
+# bm window would fall back to alacritty's built-in defaults — wrong
+# font, wrong size.
+#
+# Notes:
+# - The GTK app-id (com.ko.bm) is set via `--class` at spawn, not here
+#   — alacritty doesn't accept a class setting in the config file.
+#   Hyprland's windowrules match on that class.
+# - Blur is controlled by a hyprland windowrule on class:com.ko.bm.
+
+[general]
+# Inherit the main alacritty config (Berkeley Mono, size 13, theme).
+# Settings below override only what bm needs to differ on.
+import = [ "~/.config/alacritty/alacritty.toml" ]
+
+[window]
+# Partially transparent — the desktop/wallpaper shows through. The TUI's
+# CSS sets widget backgrounds to transparent, which renders as cells
+# with the terminal's default background — those cells punch through.
+opacity = 0.75
+
+# Tighter horizontal padding than the main config (which uses 14/14)
+# to give the narrow sidebar more usable width. Vertical 0 since
+# top/bottom already feel right with the TUI's own spacing.
+padding.x = 10
+padding.y = 0
+
+[font]
+# Approximates ghostty's `adjust-cell-height = 30%` — adds ~6px between
+# rows at 13pt. Airy spacing but still a reasonable row count.
+offset = { x = 0, y = 6 }

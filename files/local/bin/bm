@@ -18,7 +18,7 @@ set -euo pipefail
 
 CDP_PORT="${BM_CDP_PORT:-9222}"
 PROFILE_DIR="$HOME/.config/bm/profile"
-GHOSTTY_CONFIG="$HOME/.config/ghostty/bm.conf"
+ALACRITTY_CONFIG="$HOME/.config/alacritty/bm.toml"
 
 BM_BIN="${BM_BIN:-$HOME/.local/bin/bm-py}"
 
@@ -180,7 +180,7 @@ self_ghostty_address() {
   local comm parent
   while (( pid > 1 )); do
     comm="$(ps -o comm= -p "$pid" 2>/dev/null | tr -d ' ')"
-    if [[ "$comm" == "ghostty" ]]; then
+    if [[ "$comm" == "alacritty" ]]; then
       # Poll up to ~1.5s — ghostty/GTK4 + hyprland surface registration
       # can take several hundred ms on a cold start. The earlier 5×0.05
       # cap (250ms) was racing the window-mapped event and missing it,
@@ -364,11 +364,11 @@ for c in json.load(sys.stdin):
 
 cmd_focus() {
   # Focus the existing bm window if one is running; otherwise spawn a new
-  # ghostty (with bm config) and run bm inside it. Intended for hyprland
+  # alacritty (with bm config) and run bm inside it. Intended for hyprland
   # keybinds where there's no parent terminal.
   #
-  # Spawn case: setsid + disown the ghostty and return immediately.
-  # cmd_interactive (running inside the new ghostty) handles the sidebar
+  # Spawn case: setsid + disown the alacritty and return immediately.
+  # cmd_interactive (running inside the new alacritty) handles the sidebar
   # placement asynchronously, so cmd_focus doesn't block waiting for the
   # window to register and resize.
   local ghostty_pid
@@ -377,12 +377,13 @@ cmd_focus() {
       return 0
     fi
   fi
-  if ! command -v ghostty >/dev/null; then
-    echo "ghostty not installed" >&2
+  if ! command -v alacritty >/dev/null; then
+    echo "alacritty not installed" >&2
     exit 1
   fi
-  setsid ghostty \
-    --config-file="$GHOSTTY_CONFIG" \
+  setsid alacritty \
+    --class com.ko.bm \
+    --config-file="$ALACRITTY_CONFIG" \
     -e "$0" \
     </dev/null >/dev/null 2>&1 &
   disown
