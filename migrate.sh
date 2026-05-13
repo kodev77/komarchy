@@ -15,9 +15,14 @@ declare -A GROUP_NAMES=(
   [012]="dotnet" [013]="dadbod" [014]="sqlserver" [015]="mysql"
   [016]="dataverse" [017]="db2" [018]="updates" [019]="bm-tool"
   [020]="bm-tool" [021]="updates" [022]="retro" [023]="bm-tool-om37"
-  [024]="retro-emu"
+  [024]="retro-emu" [025]="updates-om37" [027]="bm-chromium"
 )
-GROUP_ORDER=(000 001 002 003 004 005 006 007 008 009 010 011 012 013 014 015 016 017 018 019 020 021 022 023 024)
+# 027-bm-chromium is shelved — scripts kept in scripts/migration/ and
+# scripts/rollback/ as an audit trail of the chromium-extension
+# exploration (see docs/bm-extension-PLAN.md and docs/bm-tauri-PLAN.md).
+# Excluded from GROUP_ORDER so it doesn't appear in the migrate menu;
+# add it back if you want to revive the extension path.
+GROUP_ORDER=(000 001 002 003 004 005 006 007 008 009 010 011 012 013 014 015 016 017 018 019 020 021 022 023 024 025)
 
 red()   { printf '\033[0;31m%s\033[0m\n' "$*"; }
 green() { printf '\033[0;32m%s\033[0m\n' "$*"; }
